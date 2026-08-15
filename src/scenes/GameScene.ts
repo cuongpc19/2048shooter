@@ -1,0 +1,973 @@
+import Phaser from "phaser";
+import {
+  GAME_W,
+  GAME_H,
+  COLS,
+  ROWS,
+  CELL,
+  GAP,
+  PITCH,
+  BOARD_X,
+  BOARD_Y,
+  BOARD_W,
+  BOARD_H,
+  BOARD_BOTTOM,
+  LAUNCH_Y,
+  LAUNCH_H,
+  HUD,
+  UI,
+  COMBO_MIN,
+  COIN_PER_COMBO_STEP,
+  COIN_PER_NEW_BEST_TILE,
+  PRICE_HAMMER,
+  PRICE_SWAP,
+  PRICE_UNDO,
+  PRICE_REVIVE,
+  REVIVE_ROWS,
+  colX,
+  rowY,
+  swatch,
+} from "../game/config";
+import {
+  Board,
+  Resolution,
+  columnHeight,
+  fromValues,
+  isFull,
+  landingRow,
+  maxTile,
+  rollValue,
+  rerollValue,
+  seedBoard,
+  settle,
+  toValues,
+} from "../game/logic";
+import { save } from "../game/save";
+import { tileKey } from "../game/textures";
+import { txt, panel, button, dashedRect, coinIcon } from "../game/ui";
+import { sfx, unlockAudio } from "../game/audio";
+
+interface Snapshot {
+  values: number[];
+  score: number;
+  coins: number;
+  current: number;
+  next: number;
+  launchCol: number;
+}
+
+type Booster = "none" | "hammer";
+
+export class GameScene extends Phaser.Scene {
+  // ── state ──────────────────────────────────────────────────────────────────
+  private board!: Board;
+  private tiles = new Map<number, Phaser.GameObjects.Image>();
+  private idSeq = 1;
+
+  private current = 2;
+  private next = 2;
+  private launchCol = Math.floor(COLS / 2);
+
+  private score = 0;
+  private coins = 0;
+  private bestTile = 0;
+
+  /** True while a shot is flying or a chain is resolving — no input gets through. */
+  private busy = false;
+  /** True while the pause or game-over sheet is up. */
+  private modal = false;
+  private over = false;
+  private armed: Booster = "none";
+
+  private undoStack: Snapshot[] = [];
+
+  // ── display ────────────────────────────────────────────────────────────────
+  /** Scale that makes a `CELL * dpr` texture draw at `CELL` design units. */
+  private TS = 1;
+  private scoreText!: Phaser.GameObjects.Text;
+  private bestText!: Phaser.GameObjects.Text;
+  private coinText!: Phaser.GameObjects.Text;
+  private goalLabel!: Phaser.GameObjects.Text;
+  private goalTile!: Phaser.GameObjects.Image;
+  private ghost!: Phaser.GameObjects.Graphics;
+  private ghostTile!: Phaser.GameObjects.Image;
+  private trackFx!: Phaser.GameObjects.Graphics;
+  private launchTile!: Phaser.GameObjects.Image;
+  private nextTile!: Phaser.GameObjects.Image;
+  private boosterLabels: Phaser.GameObjects.Text[] = [];
+  private aiming = false;
+  private aimCol = 0;
+
+  constructor() {
+    super("Game");
+  }
+
+  create(): void {
+    const dpr = (this.registry.get("dpr") as number) || 1;
+    this.cameras.main.setZoom(dpr).centerOn(GAME_W / 2, GAME_H / 2);
+    this.TS = 1 / dpr;
+
+    this.coins = Math.max(0, save.coins);
+    this.bestTile = save.bestTile;
+    this.score = 0;
+    this.over = false;
+    this.modal = false;
+    this.busy = false;
+    this.armed = "none";
+    this.undoStack = [];
+    this.tiles.clear();
+    this.idSeq = 1;
+
+    this.drawBackdrop();
+    this.buildHud();
+    this.buildLauncher();
+
+    this.board = seedBoard(() => this.idSeq++);
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++) {
+        const t = this.board[r][c];
+        if (t) this.addSprite(t.id, t.value, r, c);
+      }
+
+    this.current = rollValue();
+    this.next = rollValue();
+    this.refreshLauncher(false);
+    this.refreshHud();
+    this.paintDanger();
+
+    this.bindInput();
+  }
+
+  // ── static art ─────────────────────────────────────────────────────────────
+
+  private drawBackdrop(): void {
+    const g = this.add.graphics().setDepth(-20);
+    g.fillStyle(UI.bg, 1).fillRect(0, 0, GAME_W, GAME_H);
+
+    // The well. One rounded box behind five column tracks: the box is what the stacks live in,
+    // the tracks are what a shot travels along, and keeping them visually separate is what lets
+    // a player see an empty column as a *lane* rather than as background.
+    const well = this.add.graphics().setDepth(-15);
+    well
+      .fillStyle(UI.well, 1)
+      .fillRoundedRect(BOARD_X - 10, BOARD_Y - 10, BOARD_W + 20, BOARD_H + 20, 22);
+    well
+      .lineStyle(2, UI.wellEdge, 1)
+      .strokeRoundedRect(BOARD_X - 10, BOARD_Y - 10, BOARD_W + 20, BOARD_H + 20, 22);
+
+    for (let c = 0; c < COLS; c++) {
+      well
+        .fillStyle(UI.track, 1)
+        .fillRoundedRect(BOARD_X + c * PITCH, BOARD_Y, CELL, BOARD_H, 14);
+    }
+
+    // Per-column danger wash, repainted whenever the board changes.
+    this.trackFx = this.add.graphics().setDepth(-14);
+
+    // The launcher strip.
+    const strip = this.add.graphics().setDepth(-15);
+    strip
+      .fillStyle(UI.panel, 1)
+      .fillRoundedRect(BOARD_X - 10, LAUNCH_Y - LAUNCH_H / 2, BOARD_W + 20, LAUNCH_H, 18);
+    for (let c = 0; c < COLS; c++) {
+      const x = colX(c);
+      // A chevron per empty slot: the capture marks every column you may shoot into, which is
+      // what tells a new player the bottom row is five targets and not one cannon.
+      strip.fillStyle(0xffffff, 0.16);
+      strip.fillTriangle(x - 9, LAUNCH_Y + 5, x + 9, LAUNCH_Y + 5, x, LAUNCH_Y - 6);
+    }
+  }
+
+  private buildHud(): void {
+    const pauseBtn = this.add.container(HUD.pause.x, HUD.pause.y);
+    const pg = this.add.graphics();
+    const s = HUD.pause.size;
+    pg.fillStyle(UI.panel, 1).fillRoundedRect(-s / 2, -s / 2, s, s, 16);
+    pg.lineStyle(2, UI.panelEdge, 1).strokeRoundedRect(-s / 2, -s / 2, s, s, 16);
+    pg.fillStyle(0xffffff, 0.85).fillRect(-11, -14, 8, 28).fillRect(3, -14, 8, 28);
+    pauseBtn.add(pg);
+    pauseBtn.setSize(s, s).setInteractive({ useHandCursor: true });
+    pauseBtn.on("pointerup", () => this.openPause());
+
+    panel(this, HUD.score.x, HUD.score.y, 236, 76, 20);
+    this.scoreText = txt(this, HUD.score.x, HUD.score.y - 10, "0", 50);
+    this.bestText = txt(this, HUD.score.x, HUD.score.y + 24, `BEST ${save.best}`, 20, UI.inkDim);
+
+    // The goal badge: the next tile value that has never been made. It is the only long-term
+    // target the game has, so it sits in the corner with the score rather than behind a menu.
+    this.goalTile = this.add
+      .image(HUD.goal.x, HUD.goal.y, tileKey(this.goalValue()))
+      .setScale((HUD.goal.size / CELL) * this.TS);
+    this.goalLabel = txt(this, HUD.goal.x, HUD.goal.y + HUD.goal.size / 2 + 12, "Locked", 19, UI.inkDim);
+
+    coinIcon(this, HUD.coin.x, HUD.coin.y, 16);
+    this.coinText = txt(this, HUD.coin.x + 24, HUD.coin.y, "0", 32).setOrigin(0, 0.5);
+
+    txt(this, HUD.next.label, HUD.next.y, "NEXT", 17, UI.inkDim).setOrigin(0, 0.5);
+
+    this.buildBoosters();
+
+    this.ghost = this.add.graphics().setDepth(4);
+    this.ghostTile = this.add
+      .image(0, 0, tileKey(2))
+      .setScale(this.TS)
+      .setAlpha(0.28)
+      .setDepth(3)
+      .setVisible(false);
+  }
+
+  private buildBoosters(): void {
+    const defs: Array<{ price: number; glyph: (g: Phaser.GameObjects.Graphics) => void; run: () => void }> = [
+      {
+        // Hammer — smash one tile.
+        price: PRICE_HAMMER,
+        glyph: (g) => {
+          g.fillStyle(0xb845dd, 1).fillRoundedRect(-16, -14, 32, 14, 5);
+          g.fillStyle(0x7b5cf0, 1).fillRoundedRect(-4, -2, 8, 20, 3);
+        },
+        run: () => this.armHammer(),
+      },
+      {
+        // Swap — reroll the tile in the launcher.
+        price: PRICE_SWAP,
+        glyph: (g) => {
+          g.lineStyle(5, 0xf4562a, 1);
+          g.beginPath();
+          g.arc(0, 0, 13, Math.PI * 0.15, Math.PI * 1.6);
+          g.strokePath();
+          g.fillStyle(0xf4562a, 1).fillTriangle(11, -12, 20, -4, 8, 1);
+        },
+        run: () => this.doSwap(),
+      },
+      {
+        // Undo — take the last shot back.
+        price: PRICE_UNDO,
+        glyph: (g) => {
+          g.lineStyle(5, 0x4a6cf7, 1);
+          g.beginPath();
+          g.arc(2, 2, 12, Math.PI * 1.15, Math.PI * 0.35);
+          g.strokePath();
+          g.fillStyle(0x4a6cf7, 1).fillTriangle(-14, -10, -2, -6, -12, 4);
+        },
+        run: () => this.doUndo(),
+      },
+    ];
+
+    const size = HUD.boosters.size;
+    defs.forEach((def, i) => {
+      const x = HUD.boosters.right - (defs.length - 1 - i) * HUD.boosters.gap;
+      const y = HUD.boosters.y - 6;
+      const root = this.add.container(x, y);
+      const g = this.add.graphics();
+      g.fillStyle(UI.panel, 1).fillRoundedRect(-size / 2, -size / 2, size, size, 16);
+      g.lineStyle(2, UI.panelEdge, 1).strokeRoundedRect(-size / 2, -size / 2, size, size, 16);
+      const icon = this.add.graphics();
+      def.glyph(icon);
+      root.add([g, icon]);
+      root.setSize(size, size).setInteractive({ useHandCursor: true });
+      root.on("pointerup", () => {
+        if (this.modal || this.busy) return;
+        if (this.coins < def.price) {
+          sfx.deny();
+          this.flash(x, y, "Not enough coins");
+          return;
+        }
+        def.run();
+      });
+
+      coinIcon(this, x - 20, y + size / 2 + 12, 8);
+      this.boosterLabels.push(
+        txt(this, x - 8, y + size / 2 + 12, String(def.price), 18, UI.inkDim).setOrigin(0, 0.5),
+      );
+    });
+  }
+
+  private buildLauncher(): void {
+    this.launchTile = this.add
+      .image(colX(this.launchCol), LAUNCH_Y, tileKey(2))
+      .setScale(this.TS * 0.82)
+      .setDepth(6);
+    // The on-deck tile, small, up in the HUD. Knowing the next value is what turns a shot from
+    // a reaction into a two-move plan, and it costs one sprite.
+    //
+    // ⚠ It sits in the HUD and not beside the launcher, which is where it started. Down there
+    // it landed on top of the fifth column's chevron — so the rightmost lane looked occupied,
+    // and the preview looked like a sixth slot you could shoot from.
+    this.nextTile = this.add
+      .image(HUD.next.x, HUD.next.y, tileKey(2))
+      .setScale(this.TS * 0.44)
+      .setDepth(6)
+      .setAlpha(0.9);
+  }
+
+  // ── HUD refresh ────────────────────────────────────────────────────────────
+
+  private goalValue(): number {
+    return this.bestTile < 512 ? 512 : this.bestTile * 2;
+  }
+
+  private refreshHud(): void {
+    this.scoreText.setText(String(this.score));
+    this.bestText.setText(`BEST ${Math.max(save.best, this.score)}`);
+    this.coinText.setText(String(this.coins));
+    this.goalTile.setTexture(tileKey(this.goalValue()));
+    this.goalTile.setScale((HUD.goal.size / CELL) * this.TS);
+    this.goalLabel.setText("Locked");
+  }
+
+  private refreshLauncher(animate = true): void {
+    this.launchTile.setTexture(tileKey(this.current));
+    this.launchTile.setScale(this.TS * 0.82);
+    this.nextTile.setTexture(tileKey(this.next));
+    this.nextTile.setScale(this.TS * 0.44);
+    if (animate) {
+      this.launchTile.setScale(this.TS * 0.4);
+      this.tweens.add({
+        targets: this.launchTile,
+        scaleX: this.TS * 0.82,
+        scaleY: this.TS * 0.82,
+        duration: 160,
+        ease: "Back.easeOut",
+      });
+    }
+  }
+
+  /**
+   * Wash the columns that are one row from the bottom in red.
+   *
+   * ⚠ Per column, not one border round the whole well. The player's next decision is *which
+   * column to avoid*, and a board-wide alarm answers a question nobody asked while hiding the
+   * one that matters.
+   */
+  private paintDanger(): void {
+    this.trackFx.clear();
+    for (let c = 0; c < COLS; c++) {
+      const h = columnHeight(this.board, c);
+      if (h < ROWS - 1) continue;
+      const alpha = h >= ROWS ? 0.3 : 0.16;
+      this.trackFx
+        .fillStyle(UI.danger, alpha)
+        .fillRoundedRect(BOARD_X + c * PITCH, BOARD_Y, CELL, BOARD_H, 14);
+    }
+  }
+
+  // ── sprites ────────────────────────────────────────────────────────────────
+
+  private addSprite(id: number, value: number, row: number, col: number): Phaser.GameObjects.Image {
+    const img = this.add
+      .image(colX(col), rowY(row), tileKey(value))
+      .setScale(this.TS)
+      .setDepth(5);
+    this.tiles.set(id, img);
+    return img;
+  }
+
+  private wait(ms: number): Promise<void> {
+    return new Promise((resolve) => this.time.delayedCall(ms, resolve));
+  }
+
+  // ── input ──────────────────────────────────────────────────────────────────
+
+  private bindInput(): void {
+    this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
+      unlockAudio();
+      if (this.modal || this.over) return;
+
+      if (this.armed === "hammer") {
+        this.hammerAt(p.worldX, p.worldY);
+        return;
+      }
+      if (this.busy) return;
+      // Only the well and the launcher strip aim. Everything above BOARD_Y is HUD, and a
+      // mis-grab there must not queue up a shot that fires when the finger lifts.
+      if (p.worldY < BOARD_Y - 16 || p.worldY > LAUNCH_Y + LAUNCH_H) return;
+      this.aiming = true;
+      this.updateAim(p.worldX);
+    });
+
+    this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
+      if (!this.aiming) return;
+      this.updateAim(p.worldX);
+    });
+
+    this.input.on("pointerup", () => {
+      if (!this.aiming) return;
+      this.aiming = false;
+      this.clearGhost();
+      void this.shoot(this.aimCol);
+    });
+
+    // A pointer that leaves the canvas mid-drag never sends `pointerup`, and without this the
+    // ghost would hang on the board until the next tap.
+    this.input.on("gameout", () => {
+      this.aiming = false;
+      this.clearGhost();
+    });
+  }
+
+  private updateAim(worldX: number): void {
+    const c = Phaser.Math.Clamp(Math.floor((worldX - BOARD_X) / PITCH), 0, COLS - 1);
+    this.aimCol = c;
+    const row = landingRow(this.board, c);
+
+    this.ghost.clear();
+    if (row < 0) {
+      // Full column: show the lane as blocked instead of drawing a landing box nowhere.
+      this.ghostTile.setVisible(false);
+      this.ghost.lineStyle(3, UI.danger, 0.8);
+      dashedRect(this.ghost, BOARD_X + c * PITCH, BOARD_Y, CELL, BOARD_H);
+    } else {
+      const x = colX(c);
+      const y = rowY(row);
+      this.ghostTile.setTexture(tileKey(this.current)).setPosition(x, y).setVisible(true);
+      this.ghost.lineStyle(3, UI.ghost, 0.75);
+      dashedRect(this.ghost, x - CELL / 2, y - CELL / 2, CELL, CELL);
+      // The lane the shot will travel, so the eye can follow it up from the launcher.
+      this.ghost.fillStyle(UI.ghost, 0.05);
+      this.ghost.fillRoundedRect(x - CELL / 2, y + CELL / 2 + GAP, CELL, BOARD_BOTTOM - y - CELL / 2, 12);
+    }
+
+    this.tweens.add({
+      targets: this.launchTile,
+      x: colX(c),
+      duration: 90,
+      ease: "Quad.easeOut",
+    });
+  }
+
+  private clearGhost(): void {
+    this.ghost.clear();
+    this.ghostTile.setVisible(false);
+  }
+
+  // ── the shot ───────────────────────────────────────────────────────────────
+
+  private async shoot(col: number): Promise<void> {
+    if (this.busy || this.over || this.modal) return;
+    const row = landingRow(this.board, col);
+    if (row < 0) {
+      sfx.deny();
+      this.shake(this.launchTile);
+      return;
+    }
+
+    this.busy = true;
+    this.launchCol = col;
+    this.pushUndo();
+
+    const value = this.current;
+    const id = this.idSeq++;
+    const x = colX(col);
+
+    // The flying tile is a real sprite from the start, so the thing that lands is the thing
+    // that was in the launcher — no hand-off, no chance of the two disagreeing about value.
+    const img = this.addSprite(id, value, ROWS, col);
+    img.setPosition(x, LAUNCH_Y).setScale(this.TS * 0.82);
+    this.launchTile.setVisible(false);
+    sfx.shoot();
+
+    const dist = LAUNCH_Y - rowY(row);
+    const dur = Phaser.Math.Clamp(dist * 0.42, 110, 300);
+    this.trail(x, LAUNCH_Y, rowY(row), value);
+
+    await new Promise<void>((resolve) => {
+      this.tweens.add({
+        targets: img,
+        y: rowY(row),
+        scaleX: this.TS,
+        scaleY: this.TS,
+        duration: dur,
+        ease: "Quad.easeOut",
+        onComplete: () => resolve(),
+      });
+    });
+
+    this.board[row][col] = { id, value };
+    sfx.land();
+    this.squash(img);
+
+    const res = settle(this.board, { row, col });
+    await this.playChain(res);
+
+    // Hand over the next tile only after the chain has settled, so the launcher never shows a
+    // new value while the board is still moving.
+    this.current = this.next;
+    this.next = rollValue();
+    this.launchTile.setPosition(colX(col), LAUNCH_Y).setVisible(true);
+    this.refreshLauncher();
+    this.paintDanger();
+    this.busy = false;
+
+    if (isFull(this.board)) this.endRun();
+  }
+
+  private async playChain(res: Resolution): Promise<void> {
+    if (!res.steps.length) return;
+
+    for (let i = 0; i < res.steps.length; i++) {
+      const st = res.steps[i];
+      const tx = colX(st.into.col);
+      const ty = rowY(st.into.row);
+
+      const eaten = this.tiles.get(st.eaten.id);
+      if (eaten) {
+        this.tiles.delete(st.eaten.id);
+        this.tweens.add({
+          targets: eaten,
+          x: tx,
+          y: ty,
+          scaleX: this.TS * 0.5,
+          scaleY: this.TS * 0.5,
+          alpha: 0.2,
+          duration: 110,
+          ease: "Quad.easeIn",
+          onComplete: () => eaten.destroy(),
+        });
+      }
+      await this.wait(110);
+
+      const into = this.tiles.get(st.into.id);
+      if (into) {
+        into.setTexture(tileKey(st.into.value)).setScale(this.TS);
+        this.pop(into);
+      }
+      this.burst(tx, ty, st.into.value);
+      sfx.merge(i);
+
+      // Bystanders sliding up, plus the merged tile itself if the slide moved it too.
+      const moves = st.falls.slice();
+      if (st.at.row !== st.into.row || st.at.col !== st.into.col) {
+        moves.push({ id: st.into.id, row: st.at.row, col: st.at.col });
+      }
+      for (const m of moves) {
+        const sp = this.tiles.get(m.id);
+        if (!sp) continue;
+        this.tweens.add({
+          targets: sp,
+          x: colX(m.col),
+          y: rowY(m.row),
+          duration: 110,
+          ease: "Quad.easeOut",
+        });
+      }
+      await this.wait(moves.length ? 110 : 70);
+    }
+
+    // Scoring, once, after the chain — a score that ticked up per step would be unreadable
+    // during the exact half-second the player is watching the board.
+    const combo = res.steps.length;
+    const mult = combo >= COMBO_MIN ? 1 + (combo - COMBO_MIN + 1) * 0.5 : 1;
+    const gained = Math.round(res.points * mult);
+    this.score += gained;
+
+    this.coins += Math.max(0, combo - 1) * COIN_PER_COMBO_STEP;
+    if (res.best > this.bestTile) {
+      const jump = res.best;
+      this.bestTile = jump;
+      save.bestTile = jump;
+      this.coins += COIN_PER_NEW_BEST_TILE;
+      this.flash(GAME_W / 2, BOARD_Y + BOARD_H * 0.32, `${jump}!`, 0xffb020);
+    }
+    if (combo >= COMBO_MIN) {
+      sfx.combo();
+      this.flash(GAME_W / 2, BOARD_Y + BOARD_H * 0.45, `Combo x${combo}`, 0xffffff);
+    }
+    if (combo >= COMBO_MIN + 3) {
+      this.flash(GAME_W / 2, BOARD_Y + BOARD_H * 0.55, "So Good!", 0xffb020);
+    }
+
+    save.coins = this.coins;
+    if (this.score > save.best) save.best = this.score;
+    this.refreshHud();
+    this.floatScore(gained);
+  }
+
+  // ── boosters ───────────────────────────────────────────────────────────────
+
+  private armHammer(): void {
+    this.armed = "hammer";
+    sfx.buy();
+    this.flash(GAME_W / 2, BOARD_Y - 40, "Tap a tile to smash", 0xffffff);
+    this.clearGhost();
+    this.ghost.lineStyle(3, 0xb845dd, 0.7);
+    dashedRect(this.ghost, BOARD_X - 6, BOARD_Y - 6, BOARD_W + 12, BOARD_H + 12);
+  }
+
+  private hammerAt(worldX: number, worldY: number): void {
+    const c = Math.floor((worldX - BOARD_X) / PITCH);
+    const r = Math.floor((worldY - BOARD_Y) / PITCH);
+    if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return;
+    const t = this.board[r][c];
+    if (!t) return;
+
+    this.armed = "none";
+    this.clearGhost();
+    this.coins -= PRICE_HAMMER;
+    save.coins = this.coins;
+    this.pushUndo();
+
+    const sp = this.tiles.get(t.id);
+    this.tiles.delete(t.id);
+    if (sp) {
+      this.burst(sp.x, sp.y, t.value);
+      this.tweens.add({
+        targets: sp,
+        scaleX: this.TS * 1.4,
+        scaleY: this.TS * 1.4,
+        alpha: 0,
+        duration: 160,
+        onComplete: () => sp.destroy(),
+      });
+    }
+
+    // Punching a hole out of the middle of a stack drops everything under it — same gravity
+    // the merge path uses, so the two never disagree about where a column ends up.
+    this.board[r][c] = null;
+    let write = 0;
+    for (let rr = 0; rr < ROWS; rr++) {
+      const tile = this.board[rr][c];
+      if (!tile) continue;
+      if (rr !== write) {
+        this.board[write][c] = tile;
+        this.board[rr][c] = null;
+        const s = this.tiles.get(tile.id);
+        if (s) this.tweens.add({ targets: s, y: rowY(write), duration: 130, ease: "Quad.easeOut" });
+      }
+      write++;
+    }
+
+    sfx.buy();
+    this.refreshHud();
+
+    // A hole in the middle of a stack is gravity, and gravity can push two equals together —
+    // so a smash resolves through exactly the same settle as a shot does.
+    this.busy = true;
+    void this.wait(170).then(async () => {
+      await this.playChain(settle(this.board));
+      this.paintDanger();
+      this.busy = false;
+      if (isFull(this.board)) this.endRun();
+    });
+  }
+
+  private doSwap(): void {
+    this.coins -= PRICE_SWAP;
+    save.coins = this.coins;
+    this.current = rerollValue(this.current);
+    this.refreshLauncher();
+    this.refreshHud();
+    sfx.buy();
+  }
+
+  private doUndo(): void {
+    const snap = this.undoStack.pop();
+    if (!snap) {
+      sfx.deny();
+      this.flash(GAME_W / 2, BOARD_Y - 40, "Nothing to undo");
+      return;
+    }
+    this.coins = snap.coins - PRICE_UNDO;
+    this.restore(snap);
+    save.coins = this.coins;
+    sfx.buy();
+  }
+
+  private pushUndo(): void {
+    this.undoStack.push({
+      values: toValues(this.board),
+      score: this.score,
+      coins: this.coins,
+      current: this.current,
+      next: this.next,
+      launchCol: this.launchCol,
+    });
+    // One shot back is all the button promises. Keeping a deep history would let a player walk
+    // an entire lost board backwards for 20 coins a step, which is not a booster, it is a
+    // rewind — and it would quietly make the score meaningless.
+    if (this.undoStack.length > 1) this.undoStack.shift();
+  }
+
+  private restore(snap: Snapshot): void {
+    for (const sp of this.tiles.values()) sp.destroy();
+    this.tiles.clear();
+
+    this.board = fromValues(snap.values, () => this.idSeq++);
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++) {
+        const t = this.board[r][c];
+        if (t) this.addSprite(t.id, t.value, r, c);
+      }
+
+    this.score = snap.score;
+    this.current = snap.current;
+    this.next = snap.next;
+    this.launchCol = snap.launchCol;
+    this.over = false;
+    this.launchTile.setPosition(colX(this.launchCol), LAUNCH_Y).setVisible(true);
+    this.refreshLauncher(false);
+    this.refreshHud();
+    this.paintDanger();
+  }
+
+  // ── effects ────────────────────────────────────────────────────────────────
+
+  private pop(img: Phaser.GameObjects.Image): void {
+    this.tweens.add({
+      targets: img,
+      scaleX: this.TS * 1.22,
+      scaleY: this.TS * 1.22,
+      duration: 90,
+      yoyo: true,
+      ease: "Quad.easeOut",
+    });
+  }
+
+  private squash(img: Phaser.GameObjects.Image): void {
+    img.setScale(this.TS * 1.1, this.TS * 0.86);
+    this.tweens.add({
+      targets: img,
+      scaleX: this.TS,
+      scaleY: this.TS,
+      duration: 150,
+      ease: "Back.easeOut",
+    });
+  }
+
+  private shake(obj: Phaser.GameObjects.Image): void {
+    const x0 = obj.x;
+    this.tweens.add({
+      targets: obj,
+      x: x0 + 8,
+      duration: 45,
+      yoyo: true,
+      repeat: 2,
+      onComplete: () => obj.setX(x0),
+    });
+  }
+
+  private trail(x: number, fromY: number, toY: number, value: number): void {
+    const sw = swatch(value);
+    const g = this.add.image(x, (fromY + toY) / 2, "puff").setDepth(2);
+    g.setDisplaySize(CELL * 0.9, Math.abs(fromY - toY));
+    g.setTint(sw.light).setAlpha(0.28);
+    this.tweens.add({ targets: g, alpha: 0, duration: 320, onComplete: () => g.destroy() });
+  }
+
+  private burst(x: number, y: number, value: number): void {
+    const sw = swatch(value);
+    const flash = this.add.image(x, y, "puff").setDepth(7).setTint(sw.light).setAlpha(0.85);
+    flash.setDisplaySize(CELL * 1.6, CELL * 1.6);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      scaleX: flash.scaleX * 1.5,
+      scaleY: flash.scaleY * 1.5,
+      duration: 260,
+      onComplete: () => flash.destroy(),
+    });
+
+    for (let i = 0; i < 6; i++) {
+      const a = (Math.PI * 2 * i) / 6 + Math.random() * 0.5;
+      const d = 34 + Math.random() * 26;
+      const s = this.add.image(x, y, "spark").setDepth(8).setTint(sw.light).setScale(this.TS);
+      this.tweens.add({
+        targets: s,
+        x: x + Math.cos(a) * d,
+        y: y + Math.sin(a) * d,
+        alpha: 0,
+        scaleX: this.TS * 0.3,
+        scaleY: this.TS * 0.3,
+        duration: 300,
+        ease: "Quad.easeOut",
+        onComplete: () => s.destroy(),
+      });
+    }
+  }
+
+  private flash(x: number, y: number, text: string, tint = 0xffffff): void {
+    const t = txt(this, x, y, text, 40, "#" + tint.toString(16).padStart(6, "0")).setDepth(30);
+    t.setAlpha(0);
+    this.tweens.add({ targets: t, alpha: 1, y: y - 18, duration: 160, ease: "Quad.easeOut" });
+    this.tweens.add({
+      targets: t,
+      alpha: 0,
+      y: y - 60,
+      delay: 520,
+      duration: 300,
+      onComplete: () => t.destroy(),
+    });
+  }
+
+  private floatScore(gained: number): void {
+    if (gained <= 0) return;
+    const t = txt(this, HUD.score.x + 96, HUD.score.y - 10, `+${gained}`, 30, "#7ee2a8").setDepth(30);
+    this.tweens.add({
+      targets: t,
+      y: HUD.score.y - 52,
+      alpha: 0,
+      duration: 620,
+      onComplete: () => t.destroy(),
+    });
+    this.pop2(this.scoreText);
+  }
+
+  private pop2(t: Phaser.GameObjects.Text): void {
+    this.tweens.add({ targets: t, scale: 1.15, duration: 90, yoyo: true });
+  }
+
+  // ── sheets ─────────────────────────────────────────────────────────────────
+
+  private sheet(height: number): Phaser.GameObjects.Container {
+    this.modal = true;
+    this.aiming = false;
+    this.clearGhost();
+
+    const root = this.add.container(0, 0).setDepth(50);
+    const dim = this.add.graphics();
+    dim.fillStyle(0x000000, 0.65).fillRect(0, 0, GAME_W, GAME_H);
+    dim.setInteractive(
+      new Phaser.Geom.Rectangle(0, 0, GAME_W, GAME_H),
+      Phaser.Geom.Rectangle.Contains,
+    );
+    root.add(dim);
+
+    const card = this.add.graphics();
+    const w = 440;
+    const y = GAME_H / 2 - height / 2;
+    card.fillStyle(UI.panel, 1).fillRoundedRect((GAME_W - w) / 2, y, w, height, 28);
+    card.lineStyle(3, UI.panelEdge, 1).strokeRoundedRect((GAME_W - w) / 2, y, w, height, 28);
+    root.add(card);
+    return root;
+  }
+
+  private openPause(): void {
+    if (this.modal || this.busy) return;
+    const root = this.sheet(420);
+    const top = GAME_H / 2 - 210;
+
+    root.add(txt(this, GAME_W / 2, top + 60, "PAUSED", 52));
+    const soundBtn = button(
+      this,
+      GAME_W / 2,
+      top + 150,
+      300,
+      74,
+      save.muted ? "SOUND: OFF" : "SOUND: ON",
+      () => {
+        save.muted = !save.muted;
+        soundBtn.label.setText(save.muted ? "SOUND: OFF" : "SOUND: ON");
+      },
+      0x3a3752,
+    );
+    const resume = button(this, GAME_W / 2, top + 244, 300, 74, "RESUME", () => {
+      root.destroy(true);
+      this.modal = false;
+    });
+    const home = button(this, GAME_W / 2, top + 338, 300, 74, "HOME", () => {
+      this.scene.start("Home");
+    }, 0x3a3752);
+
+    root.add([soundBtn.root, resume.root, home.root]);
+  }
+
+  private endRun(): void {
+    this.over = true;
+    sfx.over();
+    if (this.score > save.best) save.best = this.score;
+
+    const root = this.sheet(500);
+    const top = GAME_H / 2 - 250;
+
+    root.add(txt(this, GAME_W / 2, top + 62, "GAME OVER", 50, "#ff8098"));
+    root.add(txt(this, GAME_W / 2, top + 128, String(this.score), 72));
+    root.add(txt(this, GAME_W / 2, top + 178, `BEST ${save.best}`, 24, UI.inkDim));
+
+    const canRevive = this.coins >= PRICE_REVIVE;
+    const revive = button(
+      this,
+      GAME_W / 2,
+      top + 258,
+      320,
+      78,
+      `REVIVE  ${PRICE_REVIVE}`,
+      () => {
+        if (this.coins < PRICE_REVIVE) {
+          sfx.deny();
+          return;
+        }
+        this.coins -= PRICE_REVIVE;
+        save.coins = this.coins;
+        root.destroy(true);
+        this.modal = false;
+        this.doRevive();
+      },
+      canRevive ? 0x22c55e : 0x3a3752,
+    );
+    revive.setEnabled(canRevive);
+
+    const retry = button(this, GAME_W / 2, top + 350, 320, 78, "PLAY AGAIN", () => {
+      this.scene.restart();
+    });
+    const home = button(this, GAME_W / 2, top + 440, 320, 70, "HOME", () => {
+      this.scene.start("Home");
+    }, 0x3a3752);
+
+    root.add([revive.root, retry.root, home.root]);
+  }
+
+  /** Shave `REVIVE_ROWS` off the bottom of every stack and carry on with the same score. */
+  private doRevive(): void {
+    for (let c = 0; c < COLS; c++) {
+      const h = columnHeight(this.board, c);
+      for (let r = Math.max(0, h - REVIVE_ROWS); r < h; r++) {
+        const t = this.board[r][c];
+        if (!t) continue;
+        const sp = this.tiles.get(t.id);
+        this.tiles.delete(t.id);
+        if (sp) {
+          this.burst(sp.x, sp.y, t.value);
+          this.tweens.add({
+            targets: sp,
+            alpha: 0,
+            scaleX: this.TS * 1.3,
+            scaleY: this.TS * 1.3,
+            duration: 220,
+            onComplete: () => sp.destroy(),
+          });
+        }
+        this.board[r][c] = null;
+      }
+    }
+    this.over = false;
+    this.busy = false;
+    this.refreshHud();
+    this.paintDanger();
+  }
+
+  /**
+   * Console handle: `__game.scene.getScene('Game').debugState()`.
+   *
+   * ⚠ `scripts/shot.mjs` reads this to pick a column, so it is not dead code — dropping a field
+   * turns the screenshot harness into a random tapper that dies in twenty shots and photographs
+   * an almost-empty board.
+   */
+  debugState(): {
+    board: number[];
+    score: number;
+    max: number;
+    current: number;
+    next: number;
+    over: boolean;
+    busy: boolean;
+  } {
+    return {
+      board: toValues(this.board),
+      score: this.score,
+      max: maxTile(this.board),
+      current: this.current,
+      next: this.next,
+      over: this.over,
+      busy: this.busy,
+    };
+  }
+}

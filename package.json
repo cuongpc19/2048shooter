@@ -1,0 +1,21 @@
+{
+  "name": "2048shooter",
+  "version": "0.1.0",
+  "description": "2048 Shooter - ban o so len cot, o bang nhau gop lai va nhan doi (Phaser 3 + TS + Vite)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "shot": "node scripts/shot.mjs",
+    "deploy": "npm run build && gh-pages -d dist -f"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "gh-pages": "^6.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  }
+}
