@@ -90,18 +90,35 @@ export interface Praise {
   word: string;
   size: number;
   tint: number;
-  /** Camera shake, in the units `Camera.shake` takes. 0 for the quiet rungs. */
+  /**
+   * Camera shake, in the units `Camera.shake` takes. 0 for everything but the top rungs.
+   *
+   * ⚠ Shake is the loudest thing this game can do and it only works while it stays rare. A
+   * two-merge chain happens several times a minute; shaking the screen for it makes the whole
+   * board jitter through ordinary play, and by the time a genuinely huge chain lands there is
+   * no headroom left to mark it with. The bottom three rungs get the word, the ring and the
+   * sparks — that is already plenty of "well done" — and the camera stays still until five.
+   */
   shake: number;
 }
 
 export const PRAISE: Praise[] = [
   { min: 2, word: "Nice!", size: 44, tint: 0x7ee2a8, shake: 0 },
-  { min: 3, word: "Great!", size: 52, tint: 0x63e2d4, shake: 0.002 },
-  { min: 4, word: "Awesome!", size: 58, tint: 0x8ba0ff, shake: 0.004 },
-  { min: 5, word: "Amazing!", size: 64, tint: 0xdd8bf2, shake: 0.006 },
+  { min: 3, word: "Great!", size: 52, tint: 0x63e2d4, shake: 0 },
+  { min: 4, word: "Awesome!", size: 58, tint: 0x8ba0ff, shake: 0 },
+  { min: 5, word: "Amazing!", size: 64, tint: 0xdd8bf2, shake: 0.005 },
   { min: 6, word: "So Good!", size: 68, tint: 0xffdd7a, shake: 0.009 },
-  { min: 8, word: "UNSTOPPABLE", size: 54, tint: 0xff8098, shake: 0.013 },
+  { min: 8, word: "UNSTOPPABLE", size: 54, tint: 0xff8098, shake: 0.014 },
 ];
+
+/**
+ * Tile value a new personal best has to reach before it earns a shake of its own.
+ *
+ * ⚠ Without this the early game shakes constantly: the first 8, 16, 32 and 64 of a fresh save
+ * are each a new best, they arrive within the first minute, and most come off a single merge.
+ * A "new best" is only an event once it is actually hard to reach.
+ */
+export const SHAKE_BEST_TILE = 128;
 
 export function praiseFor(chain: number): Praise | null {
   let hit: Praise | null = null;

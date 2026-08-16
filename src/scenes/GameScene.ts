@@ -19,6 +19,7 @@ import {
   COMBO_MIN,
   STREAK_MIN,
   HINT_DELAY_MS,
+  SHAKE_BEST_TILE,
   praiseFor,
   mergePoints,
   COIN_PER_COMBO_STEP,
@@ -647,10 +648,11 @@ export class GameScene extends Phaser.Scene {
     // The multiplier is a separate, smaller line under the word: the word says "well done",
     // the number says "and here is what it was worth". Collapsing them into one string loses
     // whichever half the player was not looking for.
-    if (combo >= COMBO_MIN) {
-      this.subBanner(`COMBO x${combo}`);
-      this.whiteOut(Math.min(0.06 + combo * 0.012, 0.22));
-    }
+    if (combo >= COMBO_MIN) this.subBanner(`COMBO x${combo}`);
+    // ⚠ The screen-wide flash rides the *same threshold as the shake*, not the combo threshold.
+    // Both are the entire display reacting at once, and if one of them is too loud for an
+    // ordinary three-chain then so is the other — splitting them just moves the noise.
+    if (praise && praise.shake > 0) this.whiteOut(Math.min(0.06 + combo * 0.012, 0.22));
 
     if (res.best > this.bestTile) {
       const jump = res.best;
@@ -661,7 +663,7 @@ export class GameScene extends Phaser.Scene {
       // treatment in the game and it gets it on its own, after the chain's own banner.
       this.time.delayedCall(260, () => {
         this.banner(`${jump}  NEW BEST`, 46, 0xffb020);
-        this.cameras.main.shake(300, 0.012);
+        if (jump >= SHAKE_BEST_TILE) this.cameras.main.shake(300, 0.013);
         this.whiteOut(0.28);
         this.coinFly(GAME_W / 2, BOARD_Y + BOARD_H * 0.4, 8);
       });

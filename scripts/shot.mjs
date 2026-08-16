@@ -136,6 +136,12 @@ async function main() {
   const cdp = new Cdp(ws);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
+  // ⚠ The profile is reused so Chrome starts warm, which means it also starts with a cached
+  // index.html. GitHub Pages serves HTML with max-age=600, and the old hashed bundle is still
+  // sitting on the branch — so a run against a fresh deploy silently photographs the *previous*
+  // build and reports the new feature missing. That cost a real debugging session; leave this on.
+  await cdp.send("Network.enable");
+  await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
   // ⚠ Pin the viewport to the design box at 1x. Without it the headless window is a few pixels
   // short of what was asked for, Scale.FIT letterboxes the canvas, and every tap below lands in
   // the wrong column — silently, because the game happily accepts the wrong column.

@@ -73,9 +73,15 @@ only suggests: the marked column can be ignored.
 
 Per merge: a coloured ring, sparks that grow with the chain index, a `+n` off the cell.
 Per shot: dust where the tile lands. Per chain: a praise word from the ladder in `config.ts`
-(2 merges "Nice!" up to 8 "UNSTOPPABLE"), camera shake, a white pulse, `COMBO xN` underneath,
-coins arcing into the wallet, and the score counter rolling rather than snapping. Three shots
-in a row that each merge something raise a streak banner.
+(2 merges "Nice!" up to 8 "UNSTOPPABLE"), `COMBO xN` underneath from 3, coins arcing into the
+wallet, and the score counter rolling rather than snapping. Three shots in a row that each
+merge something raise a streak banner.
+
+The two screen-wide effects — camera shake and the white pulse — are held back to chains of
+**five or more**, and a new personal-best tile only shakes from 128 up. They are the loudest
+thing the game has and they only read as special while they stay rare; the lower rungs get the
+word, the ring and the sparks, which is already plenty of "well done". Both thresholds are the
+`shake` column of `PRAISE` plus `SHAKE_BEST_TILE`, in `config.ts`.
 
 ## Boosters
 
