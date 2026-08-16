@@ -72,6 +72,52 @@ export function mergePoints(value: number): number {
 /** Merges in one shot before it counts as a combo (and starts paying a bonus). */
 export const COMBO_MIN = 3;
 
+/**
+ * The praise ladder, keyed on how many merges one shot produced.
+ *
+ * ⚠ It starts at **2**, not at `COMBO_MIN`. The combo bonus and the praise are two different
+ * jobs: the bonus is an economy dial and should stay expensive, while the praise is the
+ * game telling the player their aim worked, and that has to happen on the very first shot that
+ * does anything clever or the feedback arrives too late to teach anything.
+ *
+ * ⚠ Each rung must be *visibly* louder than the one below — bigger, and a warmer hue. A ladder
+ * whose rungs all look the same is worse than no ladder, because the player learns the words
+ * are decoration and stops reading them.
+ */
+export interface Praise {
+  /** Minimum chain length. Highest matching rung wins. */
+  min: number;
+  word: string;
+  size: number;
+  tint: number;
+  /** Camera shake, in the units `Camera.shake` takes. 0 for the quiet rungs. */
+  shake: number;
+}
+
+export const PRAISE: Praise[] = [
+  { min: 2, word: "Nice!", size: 44, tint: 0x7ee2a8, shake: 0 },
+  { min: 3, word: "Great!", size: 52, tint: 0x63e2d4, shake: 0.002 },
+  { min: 4, word: "Awesome!", size: 58, tint: 0x8ba0ff, shake: 0.004 },
+  { min: 5, word: "Amazing!", size: 64, tint: 0xdd8bf2, shake: 0.006 },
+  { min: 6, word: "So Good!", size: 68, tint: 0xffdd7a, shake: 0.009 },
+  { min: 8, word: "UNSTOPPABLE", size: 54, tint: 0xff8098, shake: 0.013 },
+];
+
+export function praiseFor(chain: number): Praise | null {
+  let hit: Praise | null = null;
+  for (const p of PRAISE) if (chain >= p.min) hit = p;
+  return hit;
+}
+
+/**
+ * Shots in a row that each merged something, before the streak banner appears.
+ *
+ * A second, slower reward loop laid over the per-shot one: the praise ladder rewards a single
+ * good shot, the streak rewards not wasting any. Three is where it starts being an achievement
+ * rather than a coincidence.
+ */
+export const STREAK_MIN = 3;
+
 // ── Economy ──────────────────────────────────────────────────────────────────
 export const COINS_START = 120;
 /** Coins for each merge in a chain past the first — combos are what pay for boosters. */

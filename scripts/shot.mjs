@@ -211,8 +211,16 @@ async function main() {
     if (!state || state.over) break;
     // Tap on the launcher strip, which no overlay ever covers.
     await cdp.tap(70 + pick(state.board, state.current) * 100, 1098);
-    await sleep(620);
-    if (i === Math.floor(taps / 2)) await snap("02-mid");
+    // ⚠ The interesting frame is *during* the chain, not after it. Every praise banner, ring
+    // and coin arc is gone within a second, so a screenshot taken once the board has settled
+    // photographs a game with no feedback in it at all.
+    if (i > 3 && i % 5 === 0) {
+      await sleep(300);
+      await snap(`02-chain-${i}`);
+      await sleep(340);
+    } else {
+      await sleep(620);
+    }
   }
   await sleep(700);
   await snap("03-after");

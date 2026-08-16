@@ -41,6 +41,25 @@ Two things the capture settles by never showing them:
 5. **The grey circle** at the right of the reference's booster row is unidentified. This build
    put the next-tile preview in the HUD instead.
 
+## The dealer
+
+`spawn.ts` is the difficulty curve and most of the pacing. It measures `potential(board, v)` —
+the longest chain a shot of `v` could produce anywhere — by simulation, and uses it to choose a
+band of outcomes: a floor that refuses to deal a third consecutive dead tile, a rescue on hot
+boards, deliberate junk on cold ones.
+
+All the tuning is the block of constants at the top of that file. The two most likely to be
+wrong for a real player:
+
+- `HOT` / `COLD` were set against the greedy bot in `shot.mjs`, which keeps the board far
+  emptier than a human does. If human play sits above 50% fill most of the time, the rescue
+  branch fires constantly and the game gets too easy — raise `HOT`.
+- `RESCUE_ODDS` at 0.8 is the "can you actually lose" dial. 1.0 removes the loss condition.
+
+⚠ The preview tile is decided one shot early — that is inherent to having a preview at all — so
+the anti-frustration counters (`dry`, `since`) are updated from the *real* outcome via
+`noteShot`, never from the prediction. Do not "simplify" that by folding them into `deal`.
+
 ## Shape of the code
 
 `config.ts` and `logic.ts` must stay free of Phaser imports — the rules are meant to be

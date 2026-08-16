@@ -35,6 +35,37 @@ npm run preview    # serve dist/
   multiplier from `COMBO_MIN` merges up.
 - Fill a column to the bottom row and the run ends. Revive shaves three rows off every stack.
 
+## Where the next number comes from
+
+`src/game/spawn.ts`, and it is not a weighted die. Every deal simulates a shot of all four
+candidate values into all five columns and takes the longest chain each one could produce —
+its **potential**. Twenty pure `settle()` calls on a forty-cell board, so the answer is exact
+rather than a heuristic that drifts out of sync with the merge rules.
+
+The potential then picks a *band*, and the base weights still roll inside it:
+
+| situation | band |
+|---|---|
+| 2 dead shots in a row | forced to potential >= 1 — the anti-frustration floor |
+| board >= 50% full, or 7 shots since a payoff | potential >= 2 at 80% odds — the rescue |
+| board <= 22% full | potential 0 at 65% odds — deliberate junk, so pressure builds |
+| otherwise | potential >= 1 at 50% odds |
+
+Plus two hard rules: never the same value three times running, and whatever came last is damped
+to 40% weight. The rescue is 80%, not certain, on purpose — a board that always gets bailed out
+has no loss condition left.
+
+Swap (the 225-coin booster) skips the roll entirely and hands over the highest-potential value
+that isn't the one you already have.
+
+## Feedback
+
+Per merge: a coloured ring, sparks that grow with the chain index, a `+n` off the cell.
+Per shot: dust where the tile lands. Per chain: a praise word from the ladder in `config.ts`
+(2 merges "Nice!" up to 8 "UNSTOPPABLE"), camera shake, a white pulse, `COMBO xN` underneath,
+coins arcing into the wallet, and the score counter rolling rather than snapping. Three shots
+in a row that each merge something raise a streak banner.
+
 ## Boosters
 
 | | cost | what it does |

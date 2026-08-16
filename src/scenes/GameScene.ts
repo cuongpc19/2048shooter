@@ -17,6 +17,9 @@ import {
   HUD,
   UI,
   COMBO_MIN,
+  STREAK_MIN,
+  praiseFor,
+  mergePoints,
   COIN_PER_COMBO_STEP,
   COIN_PER_NEW_BEST_TILE,
   PRICE_HAMMER,
@@ -36,12 +39,11 @@ import {
   isFull,
   landingRow,
   maxTile,
-  rollValue,
-  rerollValue,
   seedBoard,
   settle,
   toValues,
 } from "../game/logic";
+import { DealerState, bestSwap, deal, newDealer, noteShot } from "../game/spawn";
 import { save } from "../game/save";
 import { tileKey } from "../game/textures";
 import { txt, panel, button, dashedRect, coinIcon } from "../game/ui";
@@ -69,8 +71,13 @@ export class GameScene extends Phaser.Scene {
   private launchCol = Math.floor(COLS / 2);
 
   private score = 0;
+  /** What the HUD is *currently showing*. It chases `score` so the number rolls up. */
+  private shownScore = 0;
   private coins = 0;
   private bestTile = 0;
+  /** Shots in a row that merged at least once. */
+  private streak = 0;
+  private dealer: DealerState = newDealer();
 
   /** True while a shot is flying or a chain is resolving — no input gets through. */
   private busy = false;
@@ -110,6 +117,9 @@ export class GameScene extends Phaser.Scene {
     this.coins = Math.max(0, save.coins);
     this.bestTile = save.bestTile;
     this.score = 0;
+    this.shownScore = 0;
+    this.streak = 0;
+    this.dealer = newDealer();
     this.over = false;
     this.modal = false;
     this.busy = false;
@@ -129,8 +139,8 @@ export class GameScene extends Phaser.Scene {
         if (t) this.addSprite(t.id, t.value, r, c);
       }
 
-    this.current = rollValue();
-    this.next = rollValue();
+    this.current = deal(this.board, this.dealer);
+    this.next = deal(this.board, this.dealer);
     this.refreshLauncher(false);
     this.refreshHud();
     this.paintDanger();
@@ -307,7 +317,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private refreshHud(): void {
-    this.scoreText.setText(String(this.score));
+    // ⚠ Not `scoreText.setText` — `update()` owns that label so the number rolls up. Setting it
+    // here as well makes the total snap first and then roll to the same place, twice per chain.
     this.bestText.setText(`BEST ${Math.max(save.best, this.score)}`);
     this.coinText.setText(String(this.coins));
     this.goalTile.setTexture(tileKey(this.goalValue()));
@@ -485,14 +496,38 @@ export class GameScene extends Phaser.Scene {
     this.board[row][col] = { id, value };
     sfx.land();
     this.squash(img);
+    // A puff of dust under the tile it hit. Most shots merge nothing, and without this they
+    // land in complete silence — the squash alone is too small to register as an impact.
+    const dust = this.add
+      .image(x, rowY(row) + CELL * 0.44, "puff")
+      .setDepth(4)
+      .setAlpha(0.32);
+    dust.setDisplaySize(CELL * 1.15, CELL * 0.38);
+    this.tweens.add({
+      targets: dust,
+      alpha: 0,
+      scaleX: dust.scaleX * 1.7,
+      duration: 280,
+      onComplete: () => dust.destroy(),
+    });
 
     const res = settle(this.board, { row, col });
     await this.playChain(res);
 
+    // Streak and dealer bookkeeping both run off what actually happened, never off what the
+    // dealer predicted — see the note on staleness in spawn.ts.
+    noteShot(this.dealer, res.steps.length);
+    if (res.steps.length > 0) {
+      this.streak++;
+      if (this.streak >= STREAK_MIN) this.showStreak(this.streak);
+    } else {
+      this.streak = 0;
+    }
+
     // Hand over the next tile only after the chain has settled, so the launcher never shows a
     // new value while the board is still moving.
     this.current = this.next;
-    this.next = rollValue();
+    this.next = deal(this.board, this.dealer);
     this.launchTile.setPosition(colX(col), LAUNCH_Y).setVisible(true);
     this.refreshLauncher();
     this.paintDanger();
@@ -531,7 +566,19 @@ export class GameScene extends Phaser.Scene {
         into.setTexture(tileKey(st.into.value)).setScale(this.TS);
         this.pop(into);
       }
-      this.burst(tx, ty, st.into.value);
+      // Each merge in a chain hits harder than the last: more sparks, a wider ring, and the
+      // points for *that* merge floating off the cell it happened in. Without the per-step
+      // payoff a ten-merge chain is nine silent frames and one number at the end.
+      this.burst(tx, ty, st.into.value, i);
+      this.ring(tx, ty, st.into.value, i);
+      // ⚠ Offset off the cell, not centred on it. Centred, the "+3" lands exactly on top of the
+      // tile's own baked digits and both become unreadable at the one moment they matter.
+      this.floatAt(
+        tx + CELL * 0.46,
+        ty - CELL * 0.36,
+        `+${mergePoints(st.into.value)}`,
+        26 + Math.min(i, 5) * 3,
+      );
       sfx.merge(i);
 
       // Bystanders sliding up, plus the merged tile itself if the slide moved it too.
@@ -553,27 +600,48 @@ export class GameScene extends Phaser.Scene {
       await this.wait(moves.length ? 110 : 70);
     }
 
-    // Scoring, once, after the chain — a score that ticked up per step would be unreadable
-    // during the exact half-second the player is watching the board.
+    // Scoring, once, after the chain — a running total that ticked up per step would be
+    // unreadable during the exact half-second the player is watching the board.
     const combo = res.steps.length;
     const mult = combo >= COMBO_MIN ? 1 + (combo - COMBO_MIN + 1) * 0.5 : 1;
     const gained = Math.round(res.points * mult);
     this.score += gained;
 
-    this.coins += Math.max(0, combo - 1) * COIN_PER_COMBO_STEP;
+    const earned = Math.max(0, combo - 1) * COIN_PER_COMBO_STEP;
+    this.coins += earned;
+
+    // The praise banner. One word, one punch, sized and coloured by how big the chain was.
+    const praise = praiseFor(combo);
+    if (praise) {
+      this.banner(praise.word, praise.size, praise.tint);
+      if (praise.shake > 0) this.cameras.main.shake(180 + combo * 12, praise.shake);
+      if (combo >= COMBO_MIN) sfx.combo();
+    }
+    // The multiplier is a separate, smaller line under the word: the word says "well done",
+    // the number says "and here is what it was worth". Collapsing them into one string loses
+    // whichever half the player was not looking for.
+    if (combo >= COMBO_MIN) {
+      this.subBanner(`COMBO x${combo}`);
+      this.whiteOut(Math.min(0.06 + combo * 0.012, 0.22));
+    }
+
     if (res.best > this.bestTile) {
       const jump = res.best;
       this.bestTile = jump;
       save.bestTile = jump;
       this.coins += COIN_PER_NEW_BEST_TILE;
-      this.flash(GAME_W / 2, BOARD_Y + BOARD_H * 0.32, `${jump}!`, 0xffb020);
+      // A new highest tile is the only genuinely rare event in a run, so it gets the loudest
+      // treatment in the game and it gets it on its own, after the chain's own banner.
+      this.time.delayedCall(260, () => {
+        this.banner(`${jump}  NEW BEST`, 46, 0xffb020);
+        this.cameras.main.shake(300, 0.012);
+        this.whiteOut(0.28);
+        this.coinFly(GAME_W / 2, BOARD_Y + BOARD_H * 0.4, 8);
+      });
     }
-    if (combo >= COMBO_MIN) {
-      sfx.combo();
-      this.flash(GAME_W / 2, BOARD_Y + BOARD_H * 0.45, `Combo x${combo}`, 0xffffff);
-    }
-    if (combo >= COMBO_MIN + 3) {
-      this.flash(GAME_W / 2, BOARD_Y + BOARD_H * 0.55, "So Good!", 0xffb020);
+
+    if (earned > 0) {
+      this.coinFly(colX(res.steps[combo - 1].at.col), rowY(res.steps[combo - 1].at.row), Math.min(earned, 6));
     }
 
     save.coins = this.coins;
@@ -653,10 +721,11 @@ export class GameScene extends Phaser.Scene {
   private doSwap(): void {
     this.coins -= PRICE_SWAP;
     save.coins = this.coins;
-    this.current = rerollValue(this.current);
+    this.current = bestSwap(this.board, this.current);
     this.refreshLauncher();
     this.refreshHud();
     sfx.buy();
+    this.flash(colX(this.launchCol), LAUNCH_Y - 70, `${this.current}`, 0xffdd7a);
   }
 
   private doUndo(): void {
@@ -699,6 +768,9 @@ export class GameScene extends Phaser.Scene {
       }
 
     this.score = snap.score;
+    // An undo is a correction, not an achievement — the counter snaps rather than rolling.
+    this.shownScore = snap.score;
+    this.scoreText.setText(String(snap.score));
     this.current = snap.current;
     this.next = snap.next;
     this.launchCol = snap.launchCol;
@@ -753,10 +825,17 @@ export class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: g, alpha: 0, duration: 320, onComplete: () => g.destroy() });
   }
 
-  private burst(x: number, y: number, value: number): void {
+  /**
+   * The merge pop. `power` is the merge's index in the chain, and everything scales off it —
+   * a chain has to visibly *build*, or the tenth merge looks exactly like the first and the
+   * player has no way to feel the difference between a lucky tap and a great one.
+   */
+  private burst(x: number, y: number, value: number, power = 0): void {
     const sw = swatch(value);
+    const heat = Math.min(power, 8);
+
     const flash = this.add.image(x, y, "puff").setDepth(7).setTint(sw.light).setAlpha(0.85);
-    flash.setDisplaySize(CELL * 1.6, CELL * 1.6);
+    flash.setDisplaySize(CELL * (1.5 + heat * 0.1), CELL * (1.5 + heat * 0.1));
     this.tweens.add({
       targets: flash,
       alpha: 0,
@@ -766,10 +845,15 @@ export class GameScene extends Phaser.Scene {
       onComplete: () => flash.destroy(),
     });
 
-    for (let i = 0; i < 6; i++) {
-      const a = (Math.PI * 2 * i) / 6 + Math.random() * 0.5;
-      const d = 34 + Math.random() * 26;
-      const s = this.add.image(x, y, "spark").setDepth(8).setTint(sw.light).setScale(this.TS);
+    const n = 6 + heat * 2;
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2 * i) / n + Math.random() * 0.5;
+      const d = 34 + heat * 5 + Math.random() * 26;
+      const s = this.add
+        .image(x, y, "spark")
+        .setDepth(8)
+        .setTint(i % 3 === 0 ? 0xffffff : sw.light)
+        .setScale(this.TS * (0.8 + heat * 0.06));
       this.tweens.add({
         targets: s,
         x: x + Math.cos(a) * d,
@@ -777,15 +861,123 @@ export class GameScene extends Phaser.Scene {
         alpha: 0,
         scaleX: this.TS * 0.3,
         scaleY: this.TS * 0.3,
-        duration: 300,
+        duration: 300 + heat * 20,
         ease: "Quad.easeOut",
         onComplete: () => s.destroy(),
       });
     }
   }
 
+  /** An expanding hoop at the merge point — the cheapest possible "that mattered". */
+  private ring(x: number, y: number, value: number, power = 0): void {
+    const sw = swatch(value);
+    const g = this.add.graphics().setDepth(7).setPosition(x, y);
+    g.lineStyle(4, sw.light, 0.9).strokeCircle(0, 0, CELL * 0.4);
+    const to = 1.5 + Math.min(power, 6) * 0.22;
+    this.tweens.add({
+      targets: g,
+      scaleX: to,
+      scaleY: to,
+      alpha: 0,
+      duration: 340,
+      ease: "Quad.easeOut",
+      onComplete: () => g.destroy(),
+    });
+  }
+
+  /**
+   * The praise word: snaps in oversized, holds, leaves upward.
+   *
+   * ⚠ `Back.easeOut` from a 2.2x scale, not a fade-in. The whole point of the word is that it
+   * arrives *on* the beat of the merge that earned it; anything that ramps in over 300ms lands
+   * after the moment it is supposed to be reacting to and reads as unrelated UI.
+   */
+  private banner(word: string, size: number, tint: number): void {
+    const y = BOARD_Y + BOARD_H * 0.36;
+    const t = txt(this, GAME_W / 2, y, word, size, "#" + tint.toString(16).padStart(6, "0"))
+      .setDepth(40)
+      .setAlpha(0);
+    t.setScale(2.2);
+    t.setShadow(0, 5, "#00000099", 10, false, true);
+    this.tweens.add({ targets: t, scale: 1, alpha: 1, duration: 190, ease: "Back.easeOut" });
+    this.tweens.add({
+      targets: t,
+      y: y - 52,
+      alpha: 0,
+      delay: 560,
+      duration: 320,
+      ease: "Quad.easeIn",
+      onComplete: () => t.destroy(),
+    });
+  }
+
+  /** The quieter second line under the praise word — the multiplier, not the compliment. */
+  private subBanner(text: string): void {
+    const y = BOARD_Y + BOARD_H * 0.36 + 52;
+    const t = txt(this, GAME_W / 2, y, text, 28, UI.ink).setDepth(40).setAlpha(0);
+    this.tweens.add({ targets: t, alpha: 1, duration: 140, delay: 90 });
+    this.tweens.add({
+      targets: t,
+      alpha: 0,
+      y: y - 34,
+      delay: 620,
+      duration: 300,
+      onComplete: () => t.destroy(),
+    });
+  }
+
+  /** A full-screen white pulse. Kept low and short — this is a punctuation mark, not a strobe. */
+  private whiteOut(alpha: number): void {
+    const g = this.add.graphics().setDepth(45);
+    g.fillStyle(0xffffff, 1).fillRect(0, 0, GAME_W, GAME_H);
+    g.setAlpha(alpha);
+    this.tweens.add({ targets: g, alpha: 0, duration: 260, onComplete: () => g.destroy() });
+  }
+
+  /**
+   * Coins flying from the board into the wallet.
+   *
+   * ⚠ They have to physically travel to the counter. A coin total that just increments is a
+   * number changing somewhere the player is not looking — the arc is the only thing that
+   * connects "I made a combo" to "I can afford the hammer".
+   */
+  private coinFly(x: number, y: number, n: number): void {
+    for (let i = 0; i < n; i++) {
+      const c = coinIcon(this, 0, 0, 11).setDepth(42);
+      c.setPosition(x + (Math.random() - 0.5) * 44, y + (Math.random() - 0.5) * 44);
+      this.tweens.add({
+        targets: c,
+        x: HUD.coin.x,
+        y: HUD.coin.y,
+        duration: 380 + i * 50,
+        delay: i * 45,
+        ease: "Quad.easeIn",
+        onComplete: () => {
+          c.destroy();
+          this.pop2(this.coinText);
+        },
+      });
+    }
+  }
+
+  /** The slower reward loop: shots in a row that each did something. */
+  private showStreak(n: number): void {
+    const y = BOARD_BOTTOM - 46;
+    const t = txt(this, GAME_W / 2, y, `${n} IN A ROW`, 30, "#ffdd7a").setDepth(40).setAlpha(0);
+    t.setScale(1.6);
+    this.tweens.add({ targets: t, alpha: 1, scale: 1, duration: 170, ease: "Back.easeOut" });
+    this.tweens.add({
+      targets: t,
+      alpha: 0,
+      y: y - 30,
+      delay: 620,
+      duration: 300,
+      onComplete: () => t.destroy(),
+    });
+  }
+
   private flash(x: number, y: number, text: string, tint = 0xffffff): void {
-    const t = txt(this, x, y, text, 40, "#" + tint.toString(16).padStart(6, "0")).setDepth(30);
+    const t = txt(this, x, y, text, 34, "#" + tint.toString(16).padStart(6, "0")).setDepth(30);
     t.setAlpha(0);
     this.tweens.add({ targets: t, alpha: 1, y: y - 18, duration: 160, ease: "Quad.easeOut" });
     this.tweens.add({
@@ -794,6 +986,20 @@ export class GameScene extends Phaser.Scene {
       y: y - 60,
       delay: 520,
       duration: 300,
+      onComplete: () => t.destroy(),
+    });
+  }
+
+  /** A small "+n" rising off a cell. Used per merge, so it has to stay cheap and quiet. */
+  private floatAt(x: number, y: number, text: string, size: number): void {
+    const t = txt(this, x, y, text, size, "#ffffff").setDepth(32);
+    t.setShadow(0, 3, "#00000099", 6, false, true);
+    this.tweens.add({
+      targets: t,
+      y: y - 44,
+      alpha: 0,
+      duration: 520,
+      ease: "Quad.easeOut",
       onComplete: () => t.destroy(),
     });
   }
@@ -813,6 +1019,21 @@ export class GameScene extends Phaser.Scene {
 
   private pop2(t: Phaser.GameObjects.Text): void {
     this.tweens.add({ targets: t, scale: 1.15, duration: 90, yoyo: true });
+  }
+
+  /**
+   * The score counter chases the real total instead of snapping to it.
+   *
+   * ⚠ A frame loop rather than a tween, deliberately. Chains land in bursts and a tween per
+   * burst means several of them fighting over the same label, which shows up as the number
+   * jumping backwards. A single chase can't disagree with itself.
+   */
+  update(_time: number, delta: number): void {
+    if (this.shownScore === this.score) return;
+    const gap = this.score - this.shownScore;
+    const step = Math.max(1, Math.ceil(Math.abs(gap) * (delta / 90)));
+    this.shownScore += Math.sign(gap) * Math.min(step, Math.abs(gap));
+    this.scoreText.setText(String(this.shownScore));
   }
 
   // ── sheets ─────────────────────────────────────────────────────────────────
