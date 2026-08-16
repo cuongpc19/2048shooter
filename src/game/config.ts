@@ -118,6 +118,18 @@ export function praiseFor(chain: number): Praise | null {
  */
 export const STREAK_MIN = 3;
 
+/**
+ * Idle time before the game points at a column for you.
+ *
+ * ⚠ Three seconds is short on purpose, and it is short because of *who is stalling*. A player
+ * who knows what they are doing never sees this — they are already mid-tap — so the only person
+ * it reaches is one who is stuck, and a hint that waits eight seconds to help someone who was
+ * lost at three has spent five seconds teaching them the game has nothing to say.
+ * ⚠ It suggests, it does not gate. The hint marks a column and the player is free to ignore it;
+ * anything that blocks input until the suggested move is played stops being a hint.
+ */
+export const HINT_DELAY_MS = 3000;
+
 // ── Economy ──────────────────────────────────────────────────────────────────
 export const COINS_START = 120;
 /** Coins for each merge in a chain past the first — combos are what pay for boosters. */

@@ -18,6 +18,7 @@ import {
   UI,
   COMBO_MIN,
   STREAK_MIN,
+  HINT_DELAY_MS,
   praiseFor,
   mergePoints,
   COIN_PER_COMBO_STEP,
@@ -43,7 +44,7 @@ import {
   settle,
   toValues,
 } from "../game/logic";
-import { DealerState, bestSwap, deal, newDealer, noteShot } from "../game/spawn";
+import { DealerState, bestColumn, bestSwap, deal, newDealer, noteShot } from "../game/spawn";
 import { save } from "../game/save";
 import { tileKey } from "../game/textures";
 import { txt, panel, button, dashedRect, coinIcon } from "../game/ui";
@@ -104,6 +105,15 @@ export class GameScene extends Phaser.Scene {
   private boosterLabels: Phaser.GameObjects.Text[] = [];
   private aiming = false;
   private aimCol = 0;
+
+  // ── hint ───────────────────────────────────────────────────────────────────
+  /** Milliseconds the player has been able to move and hasn't. */
+  private idleMs = 0;
+  private hintOn = false;
+  private hintG!: Phaser.GameObjects.Graphics;
+  private hintTile!: Phaser.GameObjects.Image;
+  private hintArrow!: Phaser.GameObjects.Graphics;
+  private hintTweens: Phaser.Tweens.Tween[] = [];
 
   constructor() {
     super("Game");
@@ -224,6 +234,18 @@ export class GameScene extends Phaser.Scene {
       .setAlpha(0.28)
       .setDepth(3)
       .setVisible(false);
+
+    // The hint sits *under* the aiming ghost, so the moment the player starts aiming their own
+    // choice is the one on top — even in the frame before `hideHint` runs.
+    this.hintG = this.add.graphics().setDepth(2).setVisible(false);
+    this.hintTile = this.add
+      .image(0, 0, tileKey(2))
+      .setScale(this.TS)
+      .setAlpha(0.22)
+      .setDepth(2)
+      .setVisible(false);
+    this.hintArrow = this.add.graphics().setDepth(2).setVisible(false);
+    this.hintArrow.fillStyle(0xffdd7a, 0.95).fillTriangle(-15, 12, 15, 12, 0, -12);
   }
 
   private buildBoosters(): void {
@@ -382,6 +404,11 @@ export class GameScene extends Phaser.Scene {
   private bindInput(): void {
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       unlockAudio();
+      // ⚠ Before every other branch, including the modal one. This is the only place that sees
+      // *all* touches — booster buttons, the pause button, a stray tap on the chrome — and any
+      // of them means the player is present and does not need to be prodded.
+      this.idleMs = 0;
+      this.hideHint();
       if (this.modal || this.over) return;
 
       if (this.armed === "hammer") {
@@ -1021,19 +1048,102 @@ export class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: t, scale: 1.15, duration: 90, yoyo: true });
   }
 
+  // ── the hint ───────────────────────────────────────────────────────────────
+
   /**
-   * The score counter chases the real total instead of snapping to it.
+   * Mark the column `bestColumn` picks for the tile currently in the launcher.
    *
-   * ⚠ A frame loop rather than a tween, deliberately. Chains land in bursts and a tween per
-   * burst means several of them fighting over the same label, which shows up as the number
-   * jumping backwards. A single chase can't disagree with itself.
+   * Three marks, because the player who needs this does not yet know where to look: the lane is
+   * washed, the landing cell gets a dashed box with a faded copy of the tile in it, and an arrow
+   * bobs at the foot of the lane where the tap goes. Any one of them alone is a decoration
+   * someone stuck has already stared past.
+   */
+  private showHint(): void {
+    const pick = bestColumn(this.board, this.current);
+    if (pick.col < 0) return;
+    const row = landingRow(this.board, pick.col);
+    if (row < 0) return;
+
+    const x = colX(pick.col);
+    const y = rowY(row);
+
+    this.hintG.clear();
+    this.hintG.fillStyle(0xffdd7a, 0.07);
+    this.hintG.fillRoundedRect(BOARD_X + pick.col * PITCH, BOARD_Y, CELL, BOARD_H, 14);
+    this.hintG.lineStyle(3, 0xffdd7a, 0.85);
+    dashedRect(this.hintG, x - CELL / 2, y - CELL / 2, CELL, CELL);
+    this.hintG.setVisible(true).setAlpha(0);
+
+    this.hintTile.setTexture(tileKey(this.current)).setPosition(x, y).setVisible(true);
+    this.hintArrow.setPosition(x, BOARD_BOTTOM - 26).setVisible(true).setAlpha(0);
+
+    this.hintOn = true;
+    this.hintTweens = [
+      this.tweens.add({
+        targets: [this.hintG, this.hintArrow],
+        alpha: 1,
+        duration: 260,
+        ease: "Quad.easeOut",
+      }),
+      // The breathing pulse only starts once it has faded in, so the first thing the player
+      // sees is the mark arriving rather than the middle of a cycle.
+      this.tweens.add({
+        targets: [this.hintG, this.hintArrow],
+        alpha: 0.45,
+        delay: 260,
+        duration: 620,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      }),
+      this.tweens.add({
+        targets: this.hintArrow,
+        y: BOARD_BOTTOM - 40,
+        duration: 480,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      }),
+    ];
+  }
+
+  private hideHint(): void {
+    if (!this.hintOn) return;
+    this.hintOn = false;
+    for (const t of this.hintTweens) t.stop();
+    this.hintTweens = [];
+    this.hintG.clear().setVisible(false).setAlpha(1);
+    this.hintTile.setVisible(false);
+    this.hintArrow.setVisible(false).setAlpha(1);
+  }
+
+  /**
+   * Per-frame housekeeping: the rolling score, then the idle timer behind the hint.
+   *
+   * ⚠ The score chase is a frame loop rather than a tween on purpose. Chains land in bursts and
+   * a tween per burst means several of them fighting over the same label, which shows up as the
+   * number jumping backwards. A single chase cannot disagree with itself.
    */
   update(_time: number, delta: number): void {
-    if (this.shownScore === this.score) return;
-    const gap = this.score - this.shownScore;
-    const step = Math.max(1, Math.ceil(Math.abs(gap) * (delta / 90)));
-    this.shownScore += Math.sign(gap) * Math.min(step, Math.abs(gap));
-    this.scoreText.setText(String(this.shownScore));
+    if (this.shownScore !== this.score) {
+      const gap = this.score - this.shownScore;
+      const step = Math.max(1, Math.ceil(Math.abs(gap) * (delta / 90)));
+      this.shownScore += Math.sign(gap) * Math.min(step, Math.abs(gap));
+      this.scoreText.setText(String(this.shownScore));
+    }
+
+    // Idle only counts while a shot is actually available. Time spent watching a chain resolve,
+    // reading the pause sheet or lining up an aim is not the player being stuck, and counting
+    // it would pop the hint open the instant a long combo finished.
+    const canMove =
+      !this.busy && !this.modal && !this.over && !this.aiming && this.armed === "none";
+    if (!canMove) {
+      this.idleMs = 0;
+      this.hideHint();
+      return;
+    }
+    this.idleMs += delta;
+    if (!this.hintOn && this.idleMs >= HINT_DELAY_MS) this.showHint();
   }
 
   // ── sheets ─────────────────────────────────────────────────────────────────

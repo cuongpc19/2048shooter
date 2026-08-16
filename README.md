@@ -58,6 +58,17 @@ has no loss condition left.
 Swap (the 225-coin booster) skips the roll entirely and hands over the highest-potential value
 that isn't the one you already have.
 
+## The idle hint
+
+Three seconds without a move (`HINT_DELAY_MS`) and the game marks the column `bestColumn` picks
+for the tile in the launcher: the lane washes gold, the landing cell gets a dashed box with a
+faded copy of the tile in it, and an arrow bobs at the foot of the lane. Any touch anywhere
+clears it and restarts the timer.
+
+The timer only runs while a shot is actually available — not while a chain resolves, not while
+aiming, not behind the pause sheet — so a long combo finishing never pops the hint open. And it
+only suggests: the marked column can be ignored.
+
 ## Feedback
 
 Per merge: a coloured ring, sparks that grow with the chain index, a `+n` off the cell.

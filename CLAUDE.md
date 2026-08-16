@@ -48,6 +48,10 @@ the longest chain a shot of `v` could produce anywhere — by simulation, and us
 band of outcomes: a floor that refuses to deal a third consecutive dead tile, a rescue on hot
 boards, deliberate junk on cold ones.
 
+`bestColumn(board, value)` is the same simulation exposed per-column, and it does double duty:
+`potential()` is defined in terms of it, and the idle hint points at whatever it returns. One
+simulator, so the hint can never advise a move the dealer's own model disagrees with.
+
 All the tuning is the block of constants at the top of that file. The two most likely to be
 wrong for a real player:
 

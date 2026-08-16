@@ -235,6 +235,11 @@ async function main() {
   await sleep(700);
   await snap("03-after");
 
+  // Sit still long enough for the idle hint to come out. HINT_DELAY_MS is 3s; the extra second
+  // covers the fade-in, so this frame catches the mark at full strength rather than mid-tween.
+  await sleep(4200);
+  await snap("05-hint");
+
   // And a shot of the pause sheet, so the chrome gets looked at too.
   await cdp.tap(56, 86);
   await sleep(500);

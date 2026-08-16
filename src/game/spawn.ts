@@ -16,19 +16,27 @@
 import { COLS, ROWS, SPAWN_VALUES, SPAWN_WEIGHTS } from "./config";
 import { Board, cloneBoard, countTiles, landingRow, settle } from "./logic";
 
+export interface Suggestion {
+  /** Column to shoot into, or -1 when every column is full. */
+  col: number;
+  /** Merges that shot would produce. -1 alongside `col: -1`. */
+  chain: number;
+}
+
 /**
- * Longest merge chain a shot of `value` could produce, over every column it could go into.
+ * Best column for a shot of `value`, by simulating it into every column and settling.
  *
- * 0 = dead tile, nothing on the board can touch it.
- * 1 = one merge.
- * 3+ = a detonator.
+ * Five pure `settle()` calls on a forty-cell board — cheap enough to run for all four candidate
+ * values on every deal, and *exact*, so it can never drift out of sync with the merge rules the
+ * way a hand-written "which tiles are exposed" heuristic would.
  *
- * Twenty simulated shots per deal (four values x five columns) on a forty-cell board. That is
- * nothing, and it buys an *exact* answer — no heuristic about "which values are exposed" that
- * has to be kept in sync with the merge rules as they change.
+ * ⚠ Ties break on the **shortest column**, not on the leftmost. With nothing to merge, the move
+ * worth suggesting is the lane with the most room left — which is the advice a decent player
+ * would give, and the one that keeps the run alive.
  */
-export function potential(board: Board, value: number): number {
-  let best = 0;
+export function bestColumn(board: Board, value: number): Suggestion {
+  let best: Suggestion = { col: -1, chain: -1 };
+  let bestRow = Infinity;
   for (let c = 0; c < COLS; c++) {
     const r = landingRow(board, c);
     if (r < 0) continue;
@@ -36,9 +44,23 @@ export function potential(board: Board, value: number): number {
     // id -1 can never collide: real ids are minted from 1 upwards.
     b[r][c] = { id: -1, value };
     const chain = settle(b, { row: r, col: c }).steps.length;
-    if (chain > best) best = chain;
+    if (chain > best.chain || (chain === best.chain && r < bestRow)) {
+      best = { col: c, chain };
+      bestRow = r;
+    }
   }
   return best;
+}
+
+/**
+ * Longest merge chain a shot of `value` could produce anywhere.
+ *
+ * 0 = dead tile, nothing on the board can touch it.
+ * 1 = one merge.
+ * 2+ = a detonator.
+ */
+export function potential(board: Board, value: number): number {
+  return Math.max(0, bestColumn(board, value).chain);
 }
 
 export interface DealerState {
