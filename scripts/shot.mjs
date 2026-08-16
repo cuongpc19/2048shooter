@@ -150,15 +150,23 @@ async function main() {
     await sleep(1500);
   }
 
+  // ⚠ Two readiness signals, because `window.__game` is a DEV-only handle. Pointing this script
+  // at a real deploy with only the `__game` check makes a perfectly healthy build look dead:
+  // Phaser boots, the banner prints, the console is clean, and the script reports "never
+  // booted". A canvas inside #game is the signal that works everywhere.
   let ready = false;
   for (let i = 0; i < 80 && !ready; i++) {
     await sleep(250);
-    ready = await cdp.eval("return !!window.__game && window.__game.isRunning");
+    ready = await cdp.eval(
+      "return !!(window.__game && window.__game.isRunning) || !!document.querySelector('#game canvas')",
+    );
   }
   if (!ready) {
     console.log(cdp.logs.join("\n"));
-    throw new Error("game never booted — is `npm run dev` running?");
+    throw new Error("game never booted — dev server down, or the URL is wrong?");
   }
+  const hasProbe = await cdp.eval("return !!window.__game");
+  if (!hasProbe) console.log("note: production build — no __game handle, tapping blind");
 
   const shots = [];
   const snap = async (name) => {
@@ -207,10 +215,12 @@ async function main() {
   const taps = Number(arg("taps", 10));
   let state = null;
   for (let i = 0; i < taps; i++) {
-    state = await readState();
-    if (!state || state.over) break;
-    // Tap on the launcher strip, which no overlay ever covers.
-    await cdp.tap(70 + pick(state.board, state.current) * 100, 1098);
+    state = hasProbe ? await readState() : null;
+    if (hasProbe && (!state || state.over)) break;
+    // Tap on the launcher strip, which no overlay ever covers. A production build has no state
+    // to read, so it gets random columns — enough to prove the thing plays.
+    const col = state ? pick(state.board, state.current) : Math.floor(Math.random() * 5);
+    await cdp.tap(70 + col * 100, 1098);
     // ⚠ The interesting frame is *during* the chain, not after it. Every praise banner, ring
     // and coin arc is gone within a second, so a screenshot taken once the board has settled
     // photographs a game with no feedback in it at all.
