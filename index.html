@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <!-- iOS "Add to Home Screen" caches index.html in its own web-clip storage and keeps
+         pointing at the OLD hashed bundle. These force a revalidate so the home-screen app
+         loads the latest deploy like a normal Safari tab does. -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="theme-color" content="#12111c" />
+    <title>2048 Shooter</title>
+    <link rel="preload" as="font" type="font/ttf" href="fonts/LilitaOne.ttf" crossorigin />
+    <style>
+      @font-face {
+        font-family: "Lilita One";
+        src: url("fonts/LilitaOne.ttf") format("truetype");
+        font-display: swap;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        /* Match the game background so the FIT letterbox bars blend in. */
+        background: #12111c;
+        overflow: hidden;
+        overscroll-behavior: none;
+        touch-action: none;
+        -webkit-tap-highlight-color: transparent;
+        /* Without these a long press on the board raises the text-selection magnifier and
+           the context menu on top of a game whose only input is press-and-drag. */
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
+      }
+      #game {
+        position: absolute;
+        inset: 0;
+      }
+      #game canvas {
+        display: block;
+      }
+      /* Pure HTML boot screen — paints in the first frame, before the Phaser bundle has
+         downloaded. HomeScene hides it once the game is up. */
+      #boot {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 26px;
+        background: #12111c;
+        font-family: "Lilita One", Arial, sans-serif;
+        z-index: 10;
+        transition: opacity 0.3s ease;
+      }
+      #boot.hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #boot .title {
+        font-size: 44px;
+        color: #f4f6ff;
+        letter-spacing: 3px;
+        animation: bootPulse 1s ease-in-out infinite;
+      }
+      #boot .dots {
+        display: flex;
+        gap: 10px;
+      }
+      #boot .dots span {
+        width: 16px;
+        height: 16px;
+        border-radius: 5px;
+        animation: bootBounce 0.9s ease-in-out infinite;
+      }
+      #boot .dots span:nth-child(1) { background: #26d0e0; }
+      #boot .dots span:nth-child(2) { background: #7b5cf0; animation-delay: 0.15s; }
+      #boot .dots span:nth-child(3) { background: #f2385a; animation-delay: 0.3s; }
+      @keyframes bootPulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.06); }
+      }
+      @keyframes bootBounce {
+        0%, 100% { transform: translateY(0); opacity: 0.45; }
+        50% { transform: translateY(-12px); opacity: 1; }
+      }
+      /* The watchdog's report. Deliberately plain and selectable — its whole job is to be read
+         off a screen or copied out of a phone that has no DevTools attached to it. */
+      #boot .diag {
+        display: none;
+        max-width: 92%;
+        max-height: 60%;
+        overflow: auto;
+        font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+        color: #cdd3e8;
+        background: #1e1c2e;
+        border: 2px solid #3a3752;
+        border-radius: 10px;
+        padding: 10px 12px;
+        text-align: left;
+        white-space: pre-wrap;
+        word-break: break-word;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+    </style>
+    <!--
+      Boot watchdog. A **classic** inline script, in ES5, on purpose: a browser too old for
+      <script type="module"> ignores the bundle entirely and runs nothing at all, and a browser
+      too old for the bundle's syntax throws before any of our code exists. Either way the only
+      thing on screen is the boot poster, pulsing forever with nothing to say. It has to be
+      installed before the module is fetched, so window.onerror is already listening.
+    -->
+    <script>
+      (function () {
+        var notes = [];
+        function note(s) {
+          notes.push(s);
+        }
+        window.addEventListener("error", function (e) {
+          // Two different events share this name. A resource that 404s targets the element;
+          // a thrown exception targets the window and carries `message`.
+          if (e && e.target && e.target !== window && (e.target.src || e.target.href)) {
+            note("khong tai duoc: " + (e.target.src || e.target.href));
+          } else if (e && e.message) {
+            note("loi: " + e.message + " @ " + (e.filename || "?") + ":" + (e.lineno || 0));
+          }
+        }, true);
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e && e.reason;
+          note("promise: " + ((r && (r.stack || r.message)) || r));
+        });
+
+        function probe() {
+          var out = [];
+          out.push("URL: " + location.href);
+          out.push("UA: " + navigator.userAgent);
+          out.push("ES module: " + ("noModule" in document.createElement("script") ? "co" : "KHONG — day chinh la loi"));
+          var gl = "none";
+          try {
+            var c = document.createElement("canvas");
+            gl = c.getContext("webgl") || c.getContext("experimental-webgl")
+              ? "webgl"
+              : c.getContext("2d") ? "chi 2d" : "none";
+          } catch (err) {
+            gl = "loi: " + err;
+          }
+          out.push("canvas: " + gl);
+          out.push("storage: " + (function () {
+            try {
+              localStorage.setItem("s2048_probe", "1");
+              localStorage.removeItem("s2048_probe");
+              return "co";
+            } catch (err) {
+              return "KHONG (" + err.name + ")";
+            }
+          })());
+          out.push(notes.length ? "\n" + notes.join("\n") : "\n(khong bat duoc loi nao — bundle co the van dang tai)");
+          return out.join("\n");
+        }
+
+        // 12s: long enough that a slow link is not accused of being a broken browser, short
+        // enough to beat the point where someone gives up and closes the tab.
+        setTimeout(function () {
+          var boot = document.getElementById("boot");
+          if (!boot || document.querySelector("#game canvas")) return;
+          var d = boot.querySelector(".diag");
+          if (!d) return;
+          d.textContent = probe();
+          d.style.display = "block";
+          var t = boot.querySelector(".title");
+          if (t) {
+            t.textContent = "KHONG KHOI DONG DUOC";
+            t.style.fontSize = "22px";
+            t.style.animation = "none";
+          }
+        }, 12000);
+      })();
+    </script>
+    <script type="module" crossorigin src="./assets/index-CIoH5Fru.js"></script>
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="boot">
+      <div class="title">2048 SHOOTER</div>
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="diag"></div>
+    </div>
+  </body>
+</html>
