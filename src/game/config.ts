@@ -103,13 +103,96 @@ export interface Praise {
 }
 
 export const PRAISE: Praise[] = [
-  { min: 2, word: "Nice!", size: 44, tint: 0x7ee2a8, shake: 0 },
-  { min: 3, word: "Great!", size: 52, tint: 0x63e2d4, shake: 0 },
-  { min: 4, word: "Awesome!", size: 58, tint: 0x8ba0ff, shake: 0 },
-  { min: 5, word: "Amazing!", size: 64, tint: 0xdd8bf2, shake: 0.005 },
+  { min: 3, word: "Nice!", size: 48, tint: 0x7ee2a8, shake: 0 },
+  { min: 4, word: "Great!", size: 56, tint: 0x63e2d4, shake: 0 },
+  { min: 5, word: "Awesome!", size: 62, tint: 0x8ba0ff, shake: 0.005 },
   { min: 6, word: "So Good!", size: 68, tint: 0xffdd7a, shake: 0.009 },
   { min: 8, word: "UNSTOPPABLE", size: 54, tint: 0xff8098, shake: 0.014 },
 ];
+
+/**
+ * The other door to a compliment: a single merge that produced a tile this big.
+ *
+ * ⚠ There has to be a second door, or the praise only ever tracks *chain length* and the game
+ * says nothing at all the first time somebody builds a 256 off one careful shot — which is a
+ * far better piece of play than a lucky four-chain of 2s.
+ */
+export const PRAISE_TILE_MIN = 128;
+
+/**
+ * The praise for a chain of `chain` merges whose biggest tile was `best`, or null for silence.
+ *
+ * ⚠ Silence is the default and the ladder starts at a real combo. Praising every two-merge shot
+ * means praising several times a minute, and a compliment that arrives that often stops being
+ * read — at which point the loud rungs it was supposed to be building towards land on a player
+ * who has already learned to ignore the middle of the screen.
+ */
+export function praiseFor(chain: number, best: number): Praise | null {
+  // A big tile buys entry at the bottom rung; the chain length can still push it higher.
+  const rung = best >= PRAISE_TILE_MIN ? Math.max(chain, PRAISE[0].min) : chain;
+  let hit: Praise | null = null;
+  for (const p of PRAISE) if (rung >= p.min) hit = p;
+  return hit;
+}
+
+// ── Stages ───────────────────────────────────────────────────────────────────
+/**
+ * Stage 1 is cleared by building a 1024, stage 2 by a 2048, stage 3 by a 4096, and so on
+ * forever — each stage is one more doubling.
+ *
+ * ⚠ Clearing a stage does **not** touch the board. It was tempting to bank the target tile and
+ * hand back the cell, but that deletes the thing the player spent the whole stage building and
+ * leaves them starting the next one from nothing — a reward that reads as a punishment. The
+ * stage is a milestone laid over the run, not a level that resets it.
+ */
+export const STAGE_BASE = 1024;
+
+export function stageTarget(stage: number): number {
+  return STAGE_BASE * Math.pow(2, stage - 1);
+}
+
+export const STAGE_COINS = 150;
+
+/**
+ * How much harder each cleared stage makes the dealer, fed to `deal` as 0..1.
+ *
+ * ⚠ This is the *only* thing that ramps. Not the board size, not the spawn table, not the
+ * merge rules — every one of those changes what the player has learned to read, and a game
+ * that quietly re-teaches itself at stage 3 is a game that gets put down at stage 3. What
+ * changes is how willing the dealer is to help, which is invisible and felt.
+ */
+export const STAGE_DIFFICULTY_STEP = 0.28;
+
+export function stageDifficulty(stage: number): number {
+  return Math.max(0, Math.min(1, (stage - 1) * STAGE_DIFFICULTY_STEP));
+}
+
+// ── Pressure ─────────────────────────────────────────────────────────────────
+/**
+ * Shots between pressure rows, at difficulty 0 and at difficulty 1. See `pushRow` in logic.ts
+ * for why this mechanic exists at all and why it is not in the reference capture.
+ *
+ * ⚠ It has to stay *countable*. The bar along the top of the well shows exactly how many shots
+ * are left before the next row lands, because a board that shoves without warning turns every
+ * carefully built column into bad luck. Telegraphed pressure is difficulty; untelegraphed
+ * pressure is just noise the player is asked to absorb.
+ */
+export const PUSH_EVERY = [20, 8] as const;
+
+export function pushEvery(difficulty: number): number {
+  const d = Math.max(0, Math.min(1, difficulty));
+  return Math.max(4, Math.round(PUSH_EVERY[0] + (PUSH_EVERY[1] - PUSH_EVERY[0]) * d));
+}
+
+/**
+ * Values a pressure row is built from.
+ *
+ * ⚠ Small ones only, and never two equal side by side (see `pressureRow`). A pushed row that
+ * arrives pre-merged hands back the pressure it was supposed to apply, and a pushed 64 is a
+ * cell the player may not be able to clear for the rest of the run.
+ */
+export const PUSH_VALUES = [2, 4, 8];
+export const PUSH_WEIGHTS = [46, 34, 20];
 
 /**
  * Tile value a new personal best has to reach before it earns a shake of its own.
@@ -120,20 +203,17 @@ export const PRAISE: Praise[] = [
  */
 export const SHAKE_BEST_TILE = 128;
 
-export function praiseFor(chain: number): Praise | null {
-  let hit: Praise | null = null;
-  for (const p of PRAISE) if (chain >= p.min) hit = p;
-  return hit;
-}
-
 /**
  * Shots in a row that each merged something, before the streak banner appears.
  *
  * A second, slower reward loop laid over the per-shot one: the praise ladder rewards a single
- * good shot, the streak rewards not wasting any. Three is where it starts being an achievement
- * rather than a coincidence.
+ * good shot, the streak rewards not wasting any.
+ *
+ * ⚠ Five, not three. Three in a row is close to the base rate — the dealer's own anti-dry floor
+ * makes it hard *not* to hit — so a banner at three fires most of the time and reads as
+ * decoration rather than as an achievement.
  */
-export const STREAK_MIN = 3;
+export const STREAK_MIN = 5;
 
 /**
  * Idle time before the game points at a column for you.
@@ -276,8 +356,14 @@ export const HUD = {
   score: { x: 250, y: 86 },
   goal: { x: 470, y: 84, size: 58 },
   coin: { x: 34, y: 186 },
-  /** The on-deck tile, small, between the wallet and the boosters. `label` is the caption's
-   *  left edge — it is left-aligned, so it grows towards the tile and must start clear of it. */
-  next: { x: 214, y: 186, label: 138 },
+  /**
+   * The on-deck tile, small, between the wallet and the boosters. `label` is the caption's left
+   * edge — it is left-aligned, so it grows towards the tile and must start clear of it.
+   *
+   * ⚠ There has to be room here for a *four or five digit* coin count on its left. The first
+   * layout was measured against a starting wallet of 120 and looked fine for an hour; the moment
+   * a real balance reached 2624 the number ran straight into the "NEXT" caption.
+   */
+  next: { x: 248, y: 186, label: 174 },
   boosters: { y: 186, size: 60, gap: 82, right: 486 },
 };

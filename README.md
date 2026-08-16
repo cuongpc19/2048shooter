@@ -33,7 +33,22 @@ npm run preview    # serve dist/
   they merge as well, so the board is always left fully settled.
 - Score is the **exponent** of each tile produced (an 8 pays 3, a 256 pays 8), times a combo
   multiplier from `COMBO_MIN` merges up.
+- Every `pushEvery()` shots a **pressure row** drops in along the top and shoves every stack one
+  cell closer to the launcher. The bar in the well's top edge counts down to it.
 - Fill a column to the bottom row and the run ends. Revive shaves three rows off every stack.
+
+## Stages
+
+Stage 1 is cleared by building a **1024**, stage 2 by a **2048**, stage 3 by a **4096** — one
+more doubling each time, forever. The corner badge shows the current target.
+
+Clearing a stage pays `STAGE_COINS` and leaves the board completely untouched. Banking the
+target tile and handing back the cell was tried on paper and rejected: it deletes the thing the
+player spent the stage building, so the reward reads as a punishment.
+
+What a stage *does* change is `stageDifficulty()`, fed to the dealer and to the pressure timer.
+Nothing else ramps — not the board, not the spawn table, not the rules. A game that quietly
+re-teaches itself at stage 3 is a game that gets put down at stage 3.
 
 ## Where the next number comes from
 

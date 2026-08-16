@@ -288,6 +288,33 @@ export function seedBoard(nextId: () => number, rand: () => number = Math.random
   return b;
 }
 
+/**
+ * Insert a row along the top, shoving every column one step closer to the launcher.
+ *
+ * Returns false and changes nothing when some column has no room — that is the loss.
+ *
+ * ⚠ **This mechanic is not in the reference capture.** Six minutes of it were checked twice,
+ * frame by frame, and row 0 never gains a tile except by a merge. It is here because without
+ * it the game cannot be lost, and that is arithmetic rather than opinion: a shot adds one tile,
+ * a merge removes one, so the board only grows by `1 - mergeRate` per shot. Once a board has
+ * 2, 4, 8 and 16 all exposed along its bottom edge, *every* value the launcher can deal merges
+ * with something — measured at 0.96 merges per shot, which is a board that grows by one tile
+ * every twenty-five shots. No amount of dealer tuning reaches that, because on such a board
+ * there is no unusable tile left to deal.
+ * ⚠ Whoever revisits this: the honest alternative is to make the launcher deal values the board
+ * has outgrown, which the capture rules out — it deals 2s with a 256 on the board.
+ */
+export function pushRow(b: Board, values: number[], nextId: () => number): boolean {
+  for (let c = 0; c < COLS; c++) if (columnHeight(b, c) >= ROWS) return false;
+  for (let c = 0; c < COLS; c++) {
+    // Columns hang from row 0, so shifting every tile down one and filling the gap leaves the
+    // column packed exactly as the rest of the code assumes it always is.
+    for (let r = ROWS - 1; r > 0; r--) b[r][c] = b[r - 1][c];
+    b[0][c] = { id: nextId(), value: values[c] };
+  }
+  return true;
+}
+
 // ── Serialisation (save / undo) ──────────────────────────────────────────────
 
 /** The board as plain values, row-major, `0` for empty. */

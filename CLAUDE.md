@@ -52,17 +52,73 @@ boards, deliberate junk on cold ones.
 `potential()` is defined in terms of it, and the idle hint points at whatever it returns. One
 simulator, so the hint can never advise a move the dealer's own model disagrees with.
 
-All the tuning is the block of constants at the top of that file. The two most likely to be
-wrong for a real player:
-
-- `HOT` / `COLD` were set against the greedy bot in `shot.mjs`, which keeps the board far
-  emptier than a human does. If human play sits above 50% fill most of the time, the rescue
-  branch fires constantly and the game gets too easy — raise `HOT`.
-- `RESCUE_ODDS` at 0.8 is the "can you actually lose" dial. 1.0 removes the loss condition.
+All the tuning is the block of constants at the top of that file, each written as a pair
+`[at difficulty 0, at difficulty 1]` and interpolated by `deal`. `DRY_LIMIT` is the exception
+and stays fixed at 2 — it is the anti-frustration floor, and "the game gets more annoying as you
+get better" is not a difficulty curve.
 
 ⚠ The preview tile is decided one shot early — that is inherent to having a preview at all — so
 the anti-frustration counters (`dry`, `since`) are updated from the *real* outcome via
 `noteShot`, never from the prediction. Do not "simplify" that by folding them into `deal`.
+
+## Why pressure rows exist
+
+They are **not in the reference capture** — six minutes were checked twice and row 0 never gains
+a tile except by a merge. They are here because without them the game cannot be lost, and that
+is arithmetic:
+
+> a shot adds one tile, a merge removes one, so the board grows by `1 - mergeRate` per shot
+
+Once a board has 2, 4, 8 and 16 exposed along its bottom edge, *every* value the launcher can
+deal merges with something. Measured: **0.96 merges per shot**, a board that grows by one tile
+every twenty-five shots, and a greedy bot still alive and comfortable at 200 shots with eleven
+tiles on the board. No dealer tuning reaches that — on such a board there is no unusable tile
+left to deal. The only other lever would be dealing values the board has outgrown, which the
+capture rules out (it deals 2s with a 256 on the board).
+
+If the mechanic is ever removed, the loss condition goes with it.
+
+## Measuring difficulty
+
+`npm run shot -- --taps 900` prints one line that is the whole measurement:
+
+```
+survived: 371/900 shots · 37/40 tiles · max 1024 · score 3096 · DIED
+```
+
+`?stage=N` (dev builds only) starts a run at that stage, so a late-stage board can be measured
+without first grinding up to a 4096.
+
+Where it stands, three samples per stage with the current bot:
+
+| start | shots survived | best tile |
+|---|---|---|
+| stage 1 | 200 / 220 / 140 | 512 |
+| stage 4 | 90 / 120 / 100 | 256 |
+
+⚠ **Run length is noisy — never tune off one sample.** A single stage-1 run came back at 371
+shots with a 1024 and it was an outlier; three clean samples put the median at 200. Anything
+inside about ±40 shots is indistinguishable from luck, so a change has to move the median across
+several runs before it has been shown to do anything.
+
+⚠ **The bot's policy is part of the measurement, and getting it wrong invalidates the numbers.**
+Three policies were tried:
+
+| policy | typical run | best tile |
+|---|---|---|
+| random columns | ~20 shots | — |
+| any merge, then emptiest column | 280 | 512 |
+| longest cascade wins | 140 | 256 |
+| merge first, then emptiest, cascade as tiebreak | 200 | 512 |
+
+The middle two both *look* reasonable and both die of their own play rather than of the
+difficulty being tuned — with the second one, changing `PUSH_EVERY` from 16 to 20 moved the run
+by eight shots and nothing else, which reads as "pressure does not matter" and is entirely an
+artefact. Always measure with the strongest policy available.
+
+⚠ Do not edit `src/` while a measurement is running. Vite's HMR reloads the scene mid-run and
+the harness comes back with an empty result — which looks like a crash, not like the own goal
+it is.
 
 ## Shape of the code
 

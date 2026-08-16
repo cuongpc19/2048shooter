@@ -20,6 +20,10 @@ import {
   STREAK_MIN,
   HINT_DELAY_MS,
   SHAKE_BEST_TILE,
+  STAGE_COINS,
+  stageTarget,
+  stageDifficulty,
+  pushEvery,
   praiseFor,
   mergePoints,
   COIN_PER_COMBO_STEP,
@@ -41,11 +45,20 @@ import {
   isFull,
   landingRow,
   maxTile,
+  pushRow,
   seedBoard,
   settle,
   toValues,
 } from "../game/logic";
-import { DealerState, bestColumn, bestSwap, deal, newDealer, noteShot } from "../game/spawn";
+import {
+  DealerState,
+  bestColumn,
+  bestSwap,
+  deal,
+  newDealer,
+  noteShot,
+  pressureRow,
+} from "../game/spawn";
 import { save } from "../game/save";
 import { tileKey } from "../game/textures";
 import { txt, panel, button, dashedRect, coinIcon } from "../game/ui";
@@ -58,6 +71,8 @@ interface Snapshot {
   current: number;
   next: number;
   launchCol: number;
+  /** ⚠ Must be restored too, or undo quietly hands back a shot of pressure countdown. */
+  toPush: number;
 }
 
 type Booster = "none" | "hammer";
@@ -77,6 +92,18 @@ export class GameScene extends Phaser.Scene {
   private shownScore = 0;
   private coins = 0;
   private bestTile = 0;
+  /**
+   * Stage in progress. Cleared by building `stageTarget(stage)` — 1024, then 2048, then 4096.
+   *
+   * ⚠ Tracked against `runMax`, the biggest tile *this run*, not against the saved `bestTile`.
+   * Using the save would hand a returning player every stage they had ever cleared the moment
+   * they pressed PLAY, on an empty board.
+   */
+  private stage = 1;
+  private runMax = 0;
+  /** Shots left before the next pressure row lands. */
+  private toPush = 0;
+  private pushBar!: Phaser.GameObjects.Graphics;
   /** Shots in a row that merged at least once. */
   private streak = 0;
   private dealer: DealerState = newDealer();
@@ -130,6 +157,9 @@ export class GameScene extends Phaser.Scene {
     this.score = 0;
     this.shownScore = 0;
     this.streak = 0;
+    this.stage = 1;
+    this.runMax = 0;
+    this.toPush = pushEvery(0);
     this.dealer = newDealer();
     this.over = false;
     this.modal = false;
@@ -150,11 +180,24 @@ export class GameScene extends Phaser.Scene {
         if (t) this.addSprite(t.id, t.value, r, c);
       }
 
-    this.current = deal(this.board, this.dealer);
-    this.next = deal(this.board, this.dealer);
+    this.current = deal(this.board, this.dealer, stageDifficulty(this.stage));
+    this.next = deal(this.board, this.dealer, stageDifficulty(this.stage));
     this.refreshLauncher(false);
     this.refreshHud();
     this.paintDanger();
+    this.paintPush();
+
+    // Dev-only door so `shot.mjs` can measure a late-stage board without first grinding a run
+    // up to a 4096. Tree-shaken out of the production bundle along with the branch.
+    if (import.meta.env.DEV) {
+      const s = Number(new URLSearchParams(location.search).get("stage"));
+      if (Number.isFinite(s) && s >= 1) {
+        this.stage = Math.floor(s);
+        this.toPush = pushEvery(stageDifficulty(this.stage));
+        this.refreshHud();
+        this.paintPush();
+      }
+    }
 
     this.bindInput();
   }
@@ -184,6 +227,10 @@ export class GameScene extends Phaser.Scene {
 
     // Per-column danger wash, repainted whenever the board changes.
     this.trackFx = this.add.graphics().setDepth(-14);
+
+    // The pressure countdown, a thin bar in the well's top padding. It lives in the gap that
+    // already existed between the well's edge and row 0, so it costs no board space.
+    this.pushBar = this.add.graphics().setDepth(-13);
 
     // The launcher strip.
     const strip = this.add.graphics().setDepth(-15);
@@ -222,7 +269,7 @@ export class GameScene extends Phaser.Scene {
     this.goalLabel = txt(this, HUD.goal.x, HUD.goal.y + HUD.goal.size / 2 + 12, "Locked", 19, UI.inkDim);
 
     coinIcon(this, HUD.coin.x, HUD.coin.y, 16);
-    this.coinText = txt(this, HUD.coin.x + 24, HUD.coin.y, "0", 32).setOrigin(0, 0.5);
+    this.coinText = txt(this, HUD.coin.x + 24, HUD.coin.y, "0", 28).setOrigin(0, 0.5);
 
     txt(this, HUD.next.label, HUD.next.y, "NEXT", 17, UI.inkDim).setOrigin(0, 0.5);
 
@@ -336,7 +383,7 @@ export class GameScene extends Phaser.Scene {
   // ── HUD refresh ────────────────────────────────────────────────────────────
 
   private goalValue(): number {
-    return this.bestTile < 512 ? 512 : this.bestTile * 2;
+    return stageTarget(this.stage);
   }
 
   private refreshHud(): void {
@@ -346,7 +393,7 @@ export class GameScene extends Phaser.Scene {
     this.coinText.setText(String(this.coins));
     this.goalTile.setTexture(tileKey(this.goalValue()));
     this.goalTile.setScale((HUD.goal.size / CELL) * this.TS);
-    this.goalLabel.setText("Locked");
+    this.goalLabel.setText(`STAGE ${this.stage}`);
   }
 
   private refreshLauncher(animate = true): void {
@@ -373,6 +420,26 @@ export class GameScene extends Phaser.Scene {
    * column to avoid*, and a board-wide alarm answers a question nobody asked while hiding the
    * one that matters.
    */
+  /**
+   * Redraw the countdown to the next pressure row.
+   *
+   * Fills left to right as the row approaches and goes red on the last shot, so "one more and
+   * it drops" is readable without counting anything.
+   */
+  private paintPush(): void {
+    const span = pushEvery(stageDifficulty(this.stage));
+    const done = Phaser.Math.Clamp((span - this.toPush) / span, 0, 1);
+    const y = BOARD_Y - 7;
+    this.pushBar.clear();
+    // The empty track has to be visible on its own, or an untouched gauge reads as "no gauge".
+    this.pushBar.fillStyle(0x3d3a5c, 1).fillRoundedRect(BOARD_X, y, BOARD_W, 5, 2.5);
+    if (done <= 0) return;
+    const hot = this.toPush <= 1;
+    this.pushBar
+      .fillStyle(hot ? UI.danger : UI.gold, 1)
+      .fillRoundedRect(BOARD_X, y, Math.max(6, BOARD_W * done), 5, 2.5);
+  }
+
   private paintDanger(): void {
     this.trackFx.clear();
     for (let c = 0; c < COLS; c++) {
@@ -554,14 +621,73 @@ export class GameScene extends Phaser.Scene {
 
     // Hand over the next tile only after the chain has settled, so the launcher never shows a
     // new value while the board is still moving.
+    // Pressure lands *after* the shot has fully resolved, so the player watches their own chain
+    // finish before the board moves under them. The other order reads as the game stealing the
+    // merge they just earned.
+    this.toPush--;
+    if (this.toPush <= 0) {
+      this.toPush = pushEvery(stageDifficulty(this.stage));
+      const alive = await this.doPush();
+      if (!alive) {
+        this.paintPush();
+        this.busy = false;
+        this.endRun();
+        return;
+      }
+    }
+    this.paintPush();
+
     this.current = this.next;
-    this.next = deal(this.board, this.dealer);
+    this.next = deal(this.board, this.dealer, stageDifficulty(this.stage));
     this.launchTile.setPosition(colX(col), LAUNCH_Y).setVisible(true);
     this.refreshLauncher();
     this.paintDanger();
     this.busy = false;
 
     if (isFull(this.board)) this.endRun();
+  }
+
+  /**
+   * Drop a pressure row in. Returns false when the board had no room left — the loss.
+   *
+   * The whole board slides down first and the new row falls in behind it, staggered a little
+   * left to right, so the movement reads as something arriving from above rather than as the
+   * board glitching a row.
+   */
+  private async doPush(): Promise<boolean> {
+    const values = pressureRow();
+    if (!pushRow(this.board, values, () => this.idSeq++)) return false;
+
+    sfx.push();
+
+    for (let r = ROWS - 1; r >= 1; r--)
+      for (let c = 0; c < COLS; c++) {
+        const t = this.board[r][c];
+        if (!t) continue;
+        const sp = this.tiles.get(t.id);
+        if (sp) this.tweens.add({ targets: sp, y: rowY(r), duration: 200, ease: "Quad.easeOut" });
+      }
+
+    for (let c = 0; c < COLS; c++) {
+      const t = this.board[0][c];
+      if (!t) continue;
+      const sp = this.addSprite(t.id, t.value, 0, c);
+      sp.setY(rowY(0) - PITCH).setAlpha(0);
+      this.tweens.add({
+        targets: sp,
+        y: rowY(0),
+        alpha: 1,
+        duration: 220,
+        delay: c * 22,
+        ease: "Quad.easeOut",
+      });
+    }
+
+    await this.wait(320);
+    this.paintDanger();
+    // A pushed tile can land on its own match, and the player is owed that merge.
+    await this.playChain(settle(this.board));
+    return !isFull(this.board);
   }
 
   private async playChain(res: Resolution): Promise<void> {
@@ -638,8 +764,10 @@ export class GameScene extends Phaser.Scene {
     const earned = Math.max(0, combo - 1) * COIN_PER_COMBO_STEP;
     this.coins += earned;
 
-    // The praise banner. One word, one punch, sized and coloured by how big the chain was.
-    const praise = praiseFor(combo);
+    // The praise banner. One word, one punch — but only for a real combo or a genuinely big
+    // tile; ordinary one- and two-merge shots get the ring, the sparks and the "+n" and nothing
+    // more. See the note on `praiseFor`.
+    const praise = praiseFor(combo, res.best);
     if (praise) {
       this.banner(praise.word, praise.size, praise.tint);
       if (praise.shake > 0) this.cameras.main.shake(180 + combo * 12, praise.shake);
@@ -659,15 +787,23 @@ export class GameScene extends Phaser.Scene {
       this.bestTile = jump;
       save.bestTile = jump;
       this.coins += COIN_PER_NEW_BEST_TILE;
-      // A new highest tile is the only genuinely rare event in a run, so it gets the loudest
-      // treatment in the game and it gets it on its own, after the chain's own banner.
-      this.time.delayedCall(260, () => {
-        this.banner(`${jump}  NEW BEST`, 46, 0xffb020);
-        if (jump >= SHAKE_BEST_TILE) this.cameras.main.shake(300, 0.013);
-        this.whiteOut(0.28);
-        this.coinFly(GAME_W / 2, BOARD_Y + BOARD_H * 0.4, 8);
-      });
+      // ⚠ The coins are unconditional but the banner is not. On a fresh save the first 8, 16,
+      // 32 and 64 are all "new bests" and all arrive inside the first minute, so announcing
+      // every one of them is four fanfares before the player has done anything.
+      if (jump >= SHAKE_BEST_TILE) {
+        this.time.delayedCall(260, () => {
+          this.banner(`${jump}  NEW BEST`, 46, 0xffb020);
+          this.cameras.main.shake(300, 0.013);
+          this.whiteOut(0.28);
+          this.coinFly(GAME_W / 2, BOARD_Y + BOARD_H * 0.4, 8);
+        });
+      }
     }
+
+    // Stage progress runs off the best tile *this run*. A `while`, not an `if`: one enormous
+    // chain can cross more than one target, and each of those is a stage the player cleared.
+    if (res.best > this.runMax) this.runMax = res.best;
+    while (this.runMax >= stageTarget(this.stage)) this.clearStage();
 
     if (earned > 0) {
       this.coinFly(colX(res.steps[combo - 1].at.col), rowY(res.steps[combo - 1].at.row), Math.min(earned, 6));
@@ -677,6 +813,36 @@ export class GameScene extends Phaser.Scene {
     if (this.score > save.best) save.best = this.score;
     this.refreshHud();
     this.floatScore(gained);
+  }
+
+  /**
+   * A stage target has been reached. Pay out, advance, and say so loudly.
+   *
+   * ⚠ The board is deliberately left exactly as it is — see the note on `STAGE_BASE`. The only
+   * thing that changes is the target in the corner and, quietly, how generous the dealer is
+   * from here on.
+   */
+  private clearStage(): void {
+    const cleared = this.stage;
+    this.stage++;
+    // The new stage pushes more often, so a countdown left over from the old, longer span has
+    // to be clipped — otherwise the bar sits empty for several shots and the tightened pressure
+    // does not start applying until the next cycle.
+    this.toPush = Math.min(this.toPush, pushEvery(stageDifficulty(this.stage)));
+    this.coins += STAGE_COINS;
+    save.coins = this.coins;
+    if (cleared > save.bestStage) save.bestStage = cleared;
+    this.refreshHud();
+
+    // Held back behind the chain's own banner so the two do not print on top of each other.
+    this.time.delayedCall(520, () => {
+      this.banner(`STAGE ${cleared} CLEAR`, 56, 0xffdd7a);
+      this.subBanner(`NEXT: ${stageTarget(this.stage)}`);
+      this.cameras.main.shake(420, 0.016);
+      this.whiteOut(0.34);
+      this.coinFly(GAME_W / 2, BOARD_Y + BOARD_H * 0.4, 10);
+      sfx.combo();
+    });
   }
 
   // ── boosters ───────────────────────────────────────────────────────────────
@@ -778,6 +944,7 @@ export class GameScene extends Phaser.Scene {
       current: this.current,
       next: this.next,
       launchCol: this.launchCol,
+      toPush: this.toPush,
     });
     // One shot back is all the button promises. Keeping a deep history would let a player walk
     // an entire lost board backwards for 20 coins a step, which is not a booster, it is a
@@ -803,11 +970,13 @@ export class GameScene extends Phaser.Scene {
     this.current = snap.current;
     this.next = snap.next;
     this.launchCol = snap.launchCol;
+    this.toPush = snap.toPush;
     this.over = false;
     this.launchTile.setPosition(colX(this.launchCol), LAUNCH_Y).setVisible(true);
     this.refreshLauncher(false);
     this.refreshHud();
     this.paintDanger();
+    this.paintPush();
   }
 
   // ── effects ────────────────────────────────────────────────────────────────
@@ -1214,6 +1383,16 @@ export class GameScene extends Phaser.Scene {
     root.add(txt(this, GAME_W / 2, top + 62, "GAME OVER", 50, "#ff8098"));
     root.add(txt(this, GAME_W / 2, top + 128, String(this.score), 72));
     root.add(txt(this, GAME_W / 2, top + 178, `BEST ${save.best}`, 24, UI.inkDim));
+    root.add(
+      txt(
+        this,
+        GAME_W / 2,
+        top + 208,
+        this.stage > 1 ? `CLEARED STAGE ${this.stage - 1}` : `STAGE 1 · REACHED ${this.runMax}`,
+        22,
+        "#ffdd7a",
+      ),
+    );
 
     const canRevive = this.coins >= PRICE_REVIVE;
     const revive = button(

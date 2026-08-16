@@ -13,7 +13,7 @@
 // The whole thing rests on one cheap measurement, `potential` — and this game can afford to
 // measure it exactly, by simulation, because `settle()` is pure and a board is forty cells.
 
-import { COLS, ROWS, SPAWN_VALUES, SPAWN_WEIGHTS } from "./config";
+import { COLS, ROWS, SPAWN_VALUES, SPAWN_WEIGHTS, PUSH_VALUES, PUSH_WEIGHTS } from "./config";
 import { Board, cloneBoard, countTiles, landingRow, settle } from "./logic";
 
 export interface Suggestion {
@@ -78,31 +78,57 @@ export function newDealer(): DealerState {
 }
 
 // ── Tuning ───────────────────────────────────────────────────────────────────
+//
+// Everything below is a pair: the value at difficulty 0 (stage 1) and the value at difficulty 1
+// (stage 4 and up). `deal` interpolates between them. Difficulty never touches the board, the
+// spawn table or the rules — only how willing the dealer is to help.
 
-/** Board fill above which the player is in trouble and wants a way out. */
-const HOT = 0.5;
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+/** Board fill above which the player is in trouble and might get a way out. */
+const HOT = [0.52, 0.72] as const;
 /** Board fill below which there is nothing to work with and pressure should build. */
-const COLD = 0.22;
-/** Dead shots in a row before the next tile is *forced* to be usable. */
-const DRY_LIMIT = 2;
+const COLD = [0.22, 0.15] as const;
 /** Chain length that counts as a payoff, for the pity timer. */
 const BIG_CHAIN = 3;
 /** Shots without a payoff before the dealer starts actively looking for one. */
-const PITY = 7;
+const PITY = [8, 14] as const;
 /** Same value more than this many times running is a coincidence nobody believes. */
 const MAX_RUN = 2;
 
 /**
- * Odds of *deliberately* handing over a detonator, by situation.
+ * Dead shots in a row before the next tile is *forced* to be usable.
  *
- * ⚠ Not 1.0 at the top. A dealer that always rescues a full board removes the loss condition,
- * and a game you cannot lose stops being one after about four minutes. 0.8 leaves a real chance
- * that the board that was allowed to get full stays full — which is what makes the rescue worth
- * anything the other four times.
+ * ⚠ Fixed at 2. It does **not** scale with difficulty and it never should: this is the
+ * anti-frustration floor, and "the game gets more annoying as you get better" is not a
+ * difficulty curve. Everything else here is allowed to get meaner; this one stays.
  */
-const RESCUE_ODDS = 0.8;
+const DRY_LIMIT = 2;
+
+/**
+ * Odds of *deliberately* handing over a detonator when the board is hot.
+ *
+ * ⚠ Never 1.0. A dealer that always rescues a full board removes the loss condition, and a game
+ * you cannot lose stops being one after about four minutes.
+ */
+const RESCUE_ODDS = [0.7, 0.28] as const;
 /** Odds of deliberately handing over junk when the board is nearly empty. */
-const BUILD_ODDS = 0.65;
+const BUILD_ODDS = [0.7, 0.9] as const;
+
+/**
+ * Odds of forcing junk in the *middle* band — the ordinary case, neither hot nor cold.
+ *
+ * ⚠ This is the single biggest difficulty lever in the game, and the reason the first cut was
+ * unloseable. The band machinery below only ever chose between "prefer useful" and "no
+ * preference" — but on a board with a few different values exposed, *most* candidates are
+ * useful anyway, so "no preference" still dealt a usable tile around nine times in ten. A greedy
+ * bot merged on 93% of its shots and the board never grew: 150 shots in, it was 14 tiles full.
+ * Making the game harder needs the dealer to actively withhold, not merely to stop helping.
+ */
+const JUNK_ODDS = [0.3, 0.62] as const;
+
+/** Odds of preferring a usable tile in the middle band, when junk was not forced. */
+const LIVE_ODDS = [0.45, 0.15] as const;
 
 // ── The deal ─────────────────────────────────────────────────────────────────
 
@@ -137,7 +163,13 @@ function pickWeighted(pool: Candidate[], rand: () => number): number {
  * outcome in `noteShot` rather than from `potential` — the guarantee has to be measured on what
  * happened, not on what was predicted.
  */
-export function deal(board: Board, st: DealerState, rand: () => number = Math.random): number {
+export function deal(
+  board: Board,
+  st: DealerState,
+  difficulty = 0,
+  rand: () => number = Math.random,
+): number {
+  const d = Math.max(0, Math.min(1, difficulty));
   const fill = countTiles(board) / (ROWS * COLS);
 
   let pool: Candidate[] = SPAWN_VALUES.map((value, i) => ({
@@ -163,14 +195,22 @@ export function deal(board: Board, st: DealerState, rand: () => number = Math.ra
     // The floor. Two dead shots in a row is bad luck; three is the game wasting the player's
     // time, and no amount of "that's just probability" is heard as anything else.
     band = live;
-  } else if ((fill >= HOT || st.since >= PITY) && big.length && rand() < RESCUE_ODDS) {
+  } else if (
+    (fill >= lerp(HOT[0], HOT[1], d) || st.since >= lerp(PITY[0], PITY[1], d)) &&
+    big.length &&
+    rand() < lerp(RESCUE_ODDS[0], RESCUE_ODDS[1], d)
+  ) {
     // The payoff: the board is loaded, or nothing has gone off in a while. Detonate.
     band = big;
-  } else if (fill <= COLD && dead.length && rand() < BUILD_ODDS) {
+  } else if (fill <= lerp(COLD[0], COLD[1], d) && dead.length && rand() < lerp(BUILD_ODDS[0], BUILD_ODDS[1], d)) {
     // The build-up: an empty board has nothing to lose, so spend these shots stacking
     // something worth blowing up later.
     band = dead;
-  } else if (live.length && rand() < 0.5) {
+  } else if (dead.length && rand() < lerp(JUNK_ODDS[0], JUNK_ODDS[1], d)) {
+    // Withholding. The dry floor above is what keeps this from being cruel: it can cost the
+    // player two shots in a row and never a third.
+    band = dead;
+  } else if (live.length && rand() < lerp(LIVE_ODDS[0], LIVE_ODDS[1], d)) {
     band = live;
   }
 
@@ -187,6 +227,32 @@ export function deal(board: Board, st: DealerState, rand: () => number = Math.ra
 export function noteShot(st: DealerState, merges: number): void {
   st.dry = merges > 0 ? 0 : st.dry + 1;
   st.since = merges >= BIG_CHAIN ? 0 : st.since + 1;
+}
+
+/**
+ * One pressure row: `COLS` small values, never two equal side by side.
+ *
+ * ⚠ The no-neighbours rule is the whole point. A row that lands with a matching pair already in
+ * it detonates on arrival and gives the player back the space it was meant to take away.
+ */
+export function pressureRow(rand: () => number = Math.random): number[] {
+  const total = PUSH_WEIGHTS.reduce((a, b) => a + b, 0);
+  const roll = () => {
+    let x = rand() * total;
+    for (let i = 0; i < PUSH_VALUES.length; i++) {
+      x -= PUSH_WEIGHTS[i];
+      if (x <= 0) return PUSH_VALUES[i];
+    }
+    return PUSH_VALUES[PUSH_VALUES.length - 1];
+  };
+  const row: number[] = [];
+  for (let c = 0; c < COLS; c++) {
+    let v = roll();
+    // Three values in the pool, so at most two retries can ever be needed.
+    for (let i = 0; i < 4 && v === row[c - 1]; i++) v = roll();
+    row.push(v);
+  }
+  return row;
 }
 
 /**

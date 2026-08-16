@@ -66,6 +66,11 @@ export const sfx = {
   combo(): void {
     tone(880, 180, "triangle", 0.07);
   },
+  /** A pressure row landing. Low and flat — a warning, never a reward. */
+  push(): void {
+    tone(110, 220, "sawtooth", 0.05);
+    setTimeout(() => tone(90, 260, "sawtooth", 0.045), 90);
+  },
   buy(): void {
     tone(660, 110, "sine", 0.08);
   },

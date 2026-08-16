@@ -44,6 +44,14 @@ export const save = {
     write("bestTile", String(Math.max(0, Math.floor(v))));
   },
 
+  /** Highest stage ever *cleared*. 0 means nobody has built a 1024 yet. */
+  get bestStage(): number {
+    return num("bestStage", 0);
+  },
+  set bestStage(v: number) {
+    write("bestStage", String(Math.max(0, Math.floor(v))));
+  },
+
   get coins(): number {
     return num("coins", -1);
   },

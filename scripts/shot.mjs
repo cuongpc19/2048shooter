@@ -195,12 +195,39 @@ async function main() {
       "const s = window.__game.scene.getScene('Game'); return s && s.debugState ? s.debugState() : null;",
     );
 
-  // A greedy bot rather than a random one: shoot at a column whose bottom tile matches the
-  // launcher, otherwise at the shortest column.
-  //
-  // ⚠ Random tapping was the first cut and it is useless for screenshots — it dies inside
-  // twenty shots, photographs an almost-empty board, and then keeps tapping *through* the
-  // game-over sheet and restarts the run, so the state print comes back reading zero.
+  /**
+   * How many merges a shot of `value` into `col` would cascade, counting upward from the
+   * bottom of the stack. Vertical only — it ignores sideways merges, so it under-counts, which
+   * is the safe direction for a difficulty measurement.
+   */
+  const chainLen = (board, col, value) => {
+    const stack = [];
+    for (let r = 0; r < 8; r++) {
+      const v = board[r * 5 + col];
+      if (v > 0) stack.push(v);
+      else break;
+    }
+    let v = value;
+    let n = 0;
+    for (let i = stack.length - 1; i >= 0 && stack[i] === v; i--) {
+      v *= 2;
+      n++;
+    }
+    return n;
+  };
+
+  /**
+   * The bot: take a merge if one exists, then keep the board low, and only then prefer the
+   * longer cascade.
+   *
+   * ⚠ The weights are in that order because both simpler policies were measured and both are
+   * worse. Pure "any merge, then emptiest column" tops out at a 512 and dies at ~280 shots;
+   * pure "longest cascade wins" hoards for chains, lets the board fill and dies at ~140 with a
+   * 256. A difficulty harness has to run the *strongest* policy available or the numbers it
+   * produces measure the bot rather than the game.
+   * ⚠ Random tapping — the first version — is worse than either: it dies inside twenty shots and
+   * then taps *through* the game-over sheet, silently restarting the run mid-measurement.
+   */
   const pick = (board, current) => {
     let bestCol = 0;
     let bestScore = -1;
@@ -208,8 +235,8 @@ async function main() {
       let h = 0;
       while (h < 8 && board[h * 5 + c] > 0) h++;
       if (h >= 8) continue;
-      const under = h > 0 ? board[(h - 1) * 5 + c] : 0;
-      const s = (under === current ? 100 : 0) + (8 - h);
+      const chain = chainLen(board, c, current);
+      const s = (chain > 0 ? 1000 : 0) + (8 - h) * 10 + chain;
       if (s > bestScore) {
         bestScore = s;
         bestCol = c;
@@ -220,9 +247,11 @@ async function main() {
 
   const taps = Number(arg("taps", 10));
   let state = null;
+  let survived = 0;
   for (let i = 0; i < taps; i++) {
     state = hasProbe ? await readState() : null;
     if (hasProbe && (!state || state.over)) break;
+    survived = i + 1;
     // Tap on the launcher strip, which no overlay ever covers. A production build has no state
     // to read, so it gets random columns — enough to prove the thing plays.
     const col = state ? pick(state.board, state.current) : Math.floor(Math.random() * 5);
@@ -230,10 +259,20 @@ async function main() {
     // ⚠ The interesting frame is *during* the chain, not after it. Every praise banner, ring
     // and coin arc is gone within a second, so a screenshot taken once the board has settled
     // photographs a game with no feedback in it at all.
-    if (i > 3 && i % 5 === 0) {
+    if (i > 3 && i % 5 === 0 && i <= 20) {
       await sleep(300);
       await snap(`02-chain-${i}`);
-      await sleep(340);
+    }
+    // Wait on `busy` rather than on a fixed delay. A long chain plus a pressure row can run past
+    // any delay short enough to make a 500-shot measurement run finish this century, and a tap
+    // that arrives while the scene is busy is silently dropped — so a fixed sleep does not just
+    // make the run slow, it makes the shot count a lie.
+    if (hasProbe) {
+      for (let w = 0; w < 40; w++) {
+        const s = await readState();
+        if (!s || !s.busy) break;
+        await sleep(70);
+      }
     } else {
       await sleep(620);
     }
@@ -251,7 +290,16 @@ async function main() {
   await sleep(500);
   await snap("04-pause");
 
-  console.log("state:", JSON.stringify(await readState()));
+  const final = await readState();
+  if (final) {
+    const tiles = final.board.filter((v) => v > 0).length;
+    // The run length is the difficulty measurement — everything else is a screenshot.
+    console.log(
+      `survived: ${survived}/${taps} shots · ${tiles}/40 tiles · max ${final.max} · score ${final.score}` +
+        (final.over ? " · DIED" : " · alive"),
+    );
+  }
+  console.log("state:", JSON.stringify(final));
   console.log(cdp.logs.length ? cdp.logs.join("\n") : "console clean ✓");
   console.log("shots:\n" + shots.join("\n"));
 
